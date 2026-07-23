@@ -28,49 +28,40 @@ def get_exchange_rate():
         pass
     return 18.0
 
-# 2. Obtener grupos/expansiones de TCGCSV con User-Agent para evitar bloqueos
-@st.cache_data(ttl=14400, show_spinner=False)
-def get_tcg_groups():
-    url = "https://tcgcsv.com/3/groups"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+# 2. Obtener TODAS las expansiones oficial de Pokémon TCG
+@st.cache_data(ttl=86400)
+def get_all_sets():
+    url = "https://api.pokemontcg.io/v2/sets"
     try:
-        res = requests.get(url, headers=headers, timeout=12)
+        res = requests.get(url, timeout=10)
         if res.status_code == 200:
-            df = pd.DataFrame(res.json().get("results", []))
-            if not df.empty and 'name' in df.columns:
-                df = df.dropna(subset=['name'])
-                if 'publishedOn' in df.columns:
-                    df = df.sort_values(by='publishedOn', ascending=False)
-                return df, None
-        return pd.DataFrame(), f"Respuesta de servidor: Código {res.status_code}"
-    except Exception as e:
-        return pd.DataFrame(), str(e)
-
-# 3. Obtener precios reales de una expansión
-@st.cache_data(ttl=1800, show_spinner=False)
-def get_set_market_data(group_id):
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    prod_url = f"https://tcgcsv.com/3/{group_id}/products"
-    price_url = f"https://tcgcsv.com/3/{group_id}/prices"
-    
-    try:
-        prod_res = requests.get(prod_url, headers=headers, timeout=12)
-        price_res = requests.get(price_url, headers=headers, timeout=12)
-        
-        if prod_res.status_code == 200 and price_res.status_code == 200:
-            df_prod = pd.DataFrame(prod_res.json().get("results", []))
-            df_price = pd.DataFrame(price_res.json().get("results", []))
-            
-            if not df_prod.empty and not df_price.empty:
-                df_merged = pd.merge(df_prod, df_price, on="productId")
-                return df_merged
+            data = res.json().get("data", [])
+            df = pd.DataFrame(data)
+            # Ordenar por fecha de lanzamiento más reciente
+            if 'releaseDate' in df.columns:
+                df = df.sort_values(by='releaseDate', ascending=False)
+            return df
     except Exception:
         pass
     return pd.DataFrame()
 
-# INTERFAZ MÓVIL
+# 3. Obtener precios de mercado de una expansión específica
+@st.cache_data(ttl=3600)
+def get_set_cards_and_prices(set_id):
+    # Consultamos las cartas del set para extraer el market price actualizado
+    url = f"https://api.pokemontcg.io/v2/cards?q=set.id:{set_id}&pageSize=50"
+    try:
+        res = requests.get(url, timeout=10)
+        if res.status_code == 200:
+            cards = res.json().get("data", [])
+            return cards
+    except Exception:
+        pass
+    return []
+
+# INTERFAZ
 st.title("📦 TCG Live Market Tracker")
-st.caption("Precios reales del mercado extraídos directamente de TCGplayer.")
+st.caption("Acceso automático a todas las expansiones y precios de mercado.")
 
 # Selector de Moneda
 usd_mxn_rate = get_exchange_rate()
@@ -84,59 +75,56 @@ multiplier = usd_mxn_rate if is_mxn else 1.0
 symbol = "MXN $" if is_mxn else "$"
 
 # Cargar Expansiones
-with st.spinner("Cargando lista de expansiones..."):
-    df_groups, error_msg = get_tcg_groups()
+with st.spinner("Cargando catálogo completo de expansiones..."):
+    df_sets = get_all_sets()
 
-if not df_groups.empty:
-    search_query = st.text_input("🔍 Buscar expansión (Ej: Ascended, Evolving, Stellar, 151):")
+if not df_sets.empty:
+    search_query = st.text_input("🔍 Buscar expansión (Ej: Ascended, Evolving, 151, Obsidian):")
     
     if search_query:
-        matches = df_groups[df_groups['name'].str.contains(search_query, case=False, na=False)]
+        matches = df_sets[df_sets['name'].str.contains(search_query, case=False, na=False)]
         
         if matches.empty:
-            st.warning(f"No se encontró ninguna expansión que coincida con '{search_query}'.")
+            st.warning(f"No se encontró la expansión '{search_query}'.")
         else:
-            for _, group in matches.iterrows():
-                group_id = group['groupId']
-                group_name = group['name']
+            for _, set_row in matches.iterrows():
+                set_name = set_row['name']
+                set_id = set_row['id']
+                total_cards = set_row.get('total', 'N/A')
+                release_date = set_row.get('releaseDate', '')
                 
-                with st.expander(f"🔥 {group_name}", expanded=True):
-                    with st.spinner("Consultando precios de mercado reales..."):
-                        df_market = get_set_market_data(group_id)
+                with st.expander(f"🔥 {set_name} ({release_date[:4] if release_date else ''})", expanded=True):
+                    st.write(f"**Total de cartas en el set:** {total_cards}")
                     
-                    if not df_market.empty:
-                        sealed_keywords = ['booster box', 'elite trainer box', 'booster bundle', 
-                                           'blister', 'premium collection', 'tin', 'box', 'display']
+                    # Enlace directo a TCGplayer para ver productos sellados del set en vivo
+                    tcg_url = f"https://www.tcgplayer.com/search/pokemon/{set_id}?productLineName=pokemon&page=1"
+                    st.markdown(f"👉 [Ver productos sellados y precios en vivo en TCGplayer]({tcg_url})")
+                    
+                    # Cargar cartas más valiosas como referencia de valor del set
+                    cards = get_set_cards_and_prices(set_id)
+                    if cards:
+                        st.markdown("---")
+                        st.caption("🏆 **Top Cartas más valiosas del Set (Market Price):**")
                         
-                        pattern = '|'.join(sealed_keywords)
-                        df_market['is_sealed'] = df_market['cleanName'].str.contains(pattern, case=False, na=False)
+                        card_list = []
+                        for c in cards:
+                            tcg_info = c.get('tcgplayer', {}).get('prices', {})
+                            # Extraer el precio más alto disponible (Market Price)
+                            p_val = 0.0
+                            for price_type in ['holofoil', 'reverseHolofoil', 'normal', 'unlimitedHolofoil']:
+                                if price_type in tcg_info:
+                                    mp = tcg_info[price_type].get('market', 0.0)
+                                    if mp and mp > p_val:
+                                        p_val = mp
+                            if p_val > 0:
+                                card_list.append({'name': c['name'], 'number': c.get('number', ''), 'price': p_val})
                         
-                        # Priorizar Market Price, luego Mid / Low Price
-                        df_market['actual_price'] = df_market['marketPrice'].fillna(df_market['midPrice']).fillna(df_market['lowPrice']).fillna(0)
-                        
-                        df_sealed = df_market[(df_market['is_sealed'] == True) & (df_market['actual_price'] > 0)]
-                        
-                        if not df_sealed.empty:
-                            df_sealed = df_sealed.sort_values(by='actual_price', ascending=False)
-                            
-                            for _, item in df_sealed.iterrows():
-                                item_price = item['actual_price'] * multiplier
-                                url_tcg = f"https://www.tcgplayer.com/product/{item['productId']}"
-                                
-                                s1, s2 = st.columns([3, 1])
-                                s1.markdown(f"• [{item['name']}]({url_tcg})")
-                                s2.markdown(f"**{symbol}{item_price:,.2f}**")
-                                st.markdown("<div class='product-box'></div>", unsafe_allow_html=True)
-                        else:
-                            st.info("No se encontraron productos sellados con precio registrado para esta colección.")
-                    else:
-                        st.error("No se pudieron cargar los precios para esta expansión en este momento.")
+                        if card_list:
+                            df_top = pd.DataFrame(card_list).sort_values(by='price', ascending=False).head(5)
+                            for _, c_item in df_top.iterrows():
+                                price_converted = c_item['price'] * multiplier
+                                st.write(f"• **#{c_item['number']} {c_item['name']}** — {symbol}{price_converted:,.2f}")
     else:
-        st.info("💡 Escribe el nombre de la expansión en la barra de arriba para ver sus productos sellados.")
+        st.info("💡 Escribe el nombre de cualquier expansión en el buscador arriba para consultar sus datos.")
 else:
-    st.error("⚠️ No se pudo conectar con el servidor de datos de TCGplayer.")
-    if error_msg:
-        st.caption(f"Detalle del problema: `{error_msg}`")
-    if st.button("🔄 Reintentar conexión"):
-        st.cache_data.clear()
-        st.rerun()
+    st.error("No se pudo cargar el catálogo de expansiones en este momento.")

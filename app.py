@@ -2,31 +2,74 @@ import streamlit as st
 import requests
 import pandas as pd
 
+# Configuración de la página
 st.set_page_config(
-    page_title="TCG Live Market & Trend Tracker",
+    page_title="TCG Collector Live Tracker",
     page_icon="📦",
     layout="centered"
 )
 
-# Estilos visuales personalizados
+# Estilos CSS avanzados estilo Dashboard / App de Coleccionista
 st.markdown("""
     <style>
+    /* Estilos generales */
     .stButton>button { width: 100%; border-radius: 12px; height: 3em; font-weight: bold; }
-    .product-row { 
-        display: flex; 
-        justify-content: space-between; 
-        align-items: center; 
-        padding: 12px 0; 
-        border-bottom: 1px solid #2d3139; 
+    
+    /* Contenedor de Tarjeta de Producto */
+    .collector-card {
+        background-color: #1e222a;
+        border: 1px solid #2d3139;
+        border-radius: 12px;
+        padding: 14px;
+        margin-bottom: 10px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
     }
-    .price-tag { font-size: 1.1em; font-weight: bold; color: #ffffff; }
-    .trend-up { color: #00e676; font-weight: bold; font-size: 0.9em; }
-    .trend-down { color: #ff5252; font-weight: bold; font-size: 0.9em; }
-    .trend-flat { color: #888888; font-size: 0.9em; }
+    
+    /* Badges de tendencia */
+    .badge-up {
+        background-color: rgba(0, 230, 118, 0.15);
+        color: #00e676;
+        padding: 4px 8px;
+        border-radius: 6px;
+        font-weight: bold;
+        font-size: 0.85em;
+    }
+    .badge-down {
+        background-color: rgba(255, 82, 82, 0.15);
+        color: #ff5252;
+        padding: 4px 8px;
+        border-radius: 6px;
+        font-weight: bold;
+        font-size: 0.85em;
+    }
+    .badge-flat {
+        background-color: rgba(255, 255, 255, 0.1);
+        color: #aaa;
+        padding: 4px 8px;
+        border-radius: 6px;
+        font-size: 0.85em;
+    }
+    
+    .card-price {
+        font-size: 1.25em;
+        font-weight: bold;
+        color: #ffffff;
+        text-align: right;
+    }
+    .card-title {
+        font-size: 1.0em;
+        font-weight: 600;
+        color: #f0f2f6;
+        margin-bottom: 4px;
+    }
+    .card-subtitle {
+        font-size: 0.8em;
+        color: #8b949e;
+    }
     </style>
 """, unsafe_allow_html=True)
 
-# 1. Obtener Tipo de Cambio USD -> MXN en tiempo real
+# 1. Obtener Tipo de Cambio USD -> MXN
 @st.cache_data(ttl=3600)
 def get_exchange_rate():
     try:
@@ -38,7 +81,7 @@ def get_exchange_rate():
         pass
     return 18.0
 
-# 2. Cargar el 100% de los grupos/colecciones de Pokémon TCG (Incluye Promos y Vintage)
+# 2. Cargar TODAS las colecciones registradas
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_tcg_groups():
     url = "https://tcgcsv.com/tcgplayer/3/groups"
@@ -46,8 +89,7 @@ def get_tcg_groups():
     try:
         res = requests.get(url, headers=headers, timeout=10)
         if res.status_code == 200:
-            df = pd.DataFrame(res.json().get("results", []))
-            return df
+            return pd.DataFrame(res.json().get("results", []))
     except Exception:
         pass
     return pd.DataFrame()
@@ -70,7 +112,6 @@ def get_sealed_with_trends(group_id):
             if not df_prod.empty and not df_price.empty:
                 merged = pd.merge(df_prod, df_price, on="productId")
                 
-                # Lista de filtro exhaustivo de productos sellados
                 keywords = [
                     'booster box', 'elite trainer box', 'booster bundle', 
                     'collection box', 'tin', 'blister', 'display', 'box', 'etb', 'case',
@@ -84,7 +125,6 @@ def get_sealed_with_trends(group_id):
                 df_sealed['market_price'] = df_sealed['marketPrice'].fillna(0.0)
                 df_sealed['low_price'] = df_sealed['lowPrice'].fillna(0.0)
                 
-                # Porcentaje de variación
                 def calc_trend(row):
                     mp = row['market_price']
                     lp = row['low_price']
@@ -100,11 +140,34 @@ def get_sealed_with_trends(group_id):
         pass
     return pd.DataFrame()
 
-# INTERFAZ PRINCIPAL
-st.title("📦 TCG Live Market & Trend Tracker")
+# Cargar catálogo destacado inicial para el Home
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_featured_market_data(df_groups):
+    # Selecciona los principales sets más populares recientes y promos
+    featured_keywords = ['151', 'Evolving Skies', 'Paldea', 'Crown Zenith', 'Obsidian', 'Prismatic', 'Promo', 'Stellar', 'Surging', 'Twilight']
+    pattern = '|'.join(featured_keywords)
+    
+    featured_groups = df_groups[df_groups['name'].str.contains(pattern, case=False, na=False)].head(15)
+    
+    all_items = []
+    for _, group in featured_groups.iterrows():
+        df_items = get_sealed_with_trends(group['groupId'])
+        if not df_items.empty:
+            df_items['group_name'] = group['name']
+            all_items.append(df_items)
+            
+    if all_items:
+        return pd.concat(all_items, ignore_index=True)
+    return pd.DataFrame()
 
-# Configuración de Moneda
+
+# Cargar datos base
 usd_mxn = get_exchange_rate()
+df_groups = get_tcg_groups()
+
+# HEADER Y MONEDA
+st.title("📦 TCG Collector Tracker")
+
 currency_mode = st.radio(
     "Moneda de visualización:", 
     ["USD ($)", f"MXN ($ - Tipo de cambio: ${usd_mxn:.2f})"], 
@@ -114,46 +177,106 @@ is_mxn = "MXN" in currency_mode
 mult = usd_mxn if is_mxn else 1.0
 symbol = "MXN $" if is_mxn else "$"
 
-# Filtros de Búsqueda
-st.subheader("⚙️ Filtros de Búsqueda")
-col1, col2 = st.columns([2, 1])
+# PESTAÑAS PRINCIPALES DE LA APP
+tab_home, tab_search = st.tabs(["🏠 Inicio / Tendencias", "🔍 Buscador & Mercado"])
 
-with col1:
-    search_query = st.text_input(
-        "🔍 Buscar expansión, personaje o producto:", 
-        placeholder="Ej: charizard upc, moltres, promo, base set, 151..."
-    )
+# ---------------------------------------------------------
+# PESTAÑA 1: HOME / DASHBOARD DE TENDENCIAS
+# ---------------------------------------------------------
+with tab_home:
+    st.caption("Resumen del mercado sellado de Pokémon TCG en tiempo real.")
+    
+    if not df_groups.empty:
+        with st.spinner("Analizando tendencias destacadas del mercado..."):
+            df_featured = get_featured_market_data(df_groups)
+        
+        if not df_featured.empty:
+            # Top Ganadores (Alza)
+            st.subheader("🔥 Cajas y Colecciones a la Alza")
+            top_gainers = df_featured.sort_values(by='trend_pct', ascending=False).head(5)
+            
+            for _, item in top_gainers.iterrows():
+                p_val = item['market_price'] * mult
+                trend = item['trend_pct']
+                
+                st.markdown(f"""
+                <div class="collector-card">
+                    <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+                        <div>
+                            <div class="card-title">{item['cleanName']}</div>
+                            <div class="card-subtitle">📁 {item['group_name']}</div>
+                            <div style="margin-top: 8px;">
+                                <span class="badge-up">▲ +{trend}% En Alta</span>
+                            </div>
+                        </div>
+                        <div class="card-price">{symbol}{p_val:,.2f}</div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+            st.markdown("---")
+            
+            # Top Correcciones (Baja / Oportunidades)
+            st.subheader("📉 Cajas con Ajuste / En Baja")
+            top_losers = df_featured.sort_values(by='trend_pct', ascending=True).head(5)
+            
+            for _, item in top_losers.iterrows():
+                p_val = item['market_price'] * mult
+                trend = item['trend_pct']
+                badge_class = "badge-down" if trend < 0 else "badge-flat"
+                sign = "" if trend < 0 else "+"
+                
+                st.markdown(f"""
+                <div class="collector-card">
+                    <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+                        <div>
+                            <div class="card-title">{item['cleanName']}</div>
+                            <div class="card-subtitle">📁 {item['group_name']}</div>
+                            <div style="margin-top: 8px;">
+                                <span class="{badge_class}">▼ {sign}{trend}% Ajuste</span>
+                            </div>
+                        </div>
+                        <div class="card-price">{symbol}{p_val:,.2f}</div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+    else:
+        st.error("No se pudieron cargar los datos del mercado en el Inicio.")
 
-with col2:
-    trend_filter = st.selectbox(
-        "📈 Orden / Tendencia:",
-        [
-            "Todos (Sin Orden)",
-            "🔥 Mayor % a la Alza (Descendente)",
-            "📉 Mayor % a la Baja (Ascendente)",
-            "🟢 Solo en Alza (+)",
-            "🔴 Solo en Baja (-)"
-        ]
-    )
+# ---------------------------------------------------------
+# PESTAÑA 2: BUSCADOR COMPLETO
+# ---------------------------------------------------------
+with tab_search:
+    st.subheader("⚙️ Buscador Global de Productos")
+    
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        search_query = st.text_input(
+            "🔍 Buscar por colección, personaje o producto:", 
+            placeholder="Ej: charizard upc, moltres, 151, base set, etb..."
+        )
+    with col2:
+        trend_filter = st.selectbox(
+            "📈 Ordenar por:",
+            [
+                "Todos (Sin Orden)",
+                "🔥 Mayor % a la Alza",
+                "📉 Mayor % a la Baja",
+                "🟢 Solo en Alza (+)",
+                "🔴 Solo en Baja (-)"
+            ]
+        )
 
-df_groups = get_tcg_groups()
-
-if not df_groups.empty:
-    if search_query:
+    if not df_groups.empty and search_query:
         query_terms = search_query.lower().split()
         
-        # Estrategia de búsqueda flexible:
-        # 1. Coincidencia directa por nombre de grupo
         def group_matches(name):
             text = str(name).lower()
             return all(term in text for term in query_terms)
 
         direct_matches = df_groups[df_groups['name'].apply(group_matches)]
         
-        # 2. Si es una búsqueda general de producto (ej. charizard, moltres, upc, promo),
-        # incluimos además todos los grupos con palabras clave como 'promo', 'swsh', 'sv', 'sm', 'xy', etc.
-        if direct_matches.empty or any(term in ['upc', 'charizard', 'moltres', 'promo', 'box', 'tin'] for term in query_terms):
-            # Priorizamos buscar en la lista completa para no ignorar productos en sets Promos
+        if direct_matches.empty or any(term in ['upc', 'charizard', 'moltres', 'promo', 'box', 'tin', 'etb'] for term in query_terms):
             groups_to_check = df_groups
         else:
             groups_to_check = direct_matches
@@ -165,7 +288,6 @@ if not df_groups.empty:
             df_items = get_sealed_with_trends(group['groupId'])
             
             if not df_items.empty:
-                # Filtrado multi-palabra (Grupo + Nombre del Producto)
                 def matches_full_product(product_name):
                     full_text = f"{group_name} {product_name}".lower()
                     return all(term in full_text for term in query_terms)
@@ -179,41 +301,41 @@ if not df_groups.empty:
                     elif trend_filter == "🔴 Solo en Baja (-)":
                         filtered_items = filtered_items[filtered_items['trend_pct'] < -1.0]
                     
-                    # Ordenamiento por Porcentaje
-                    if trend_filter in ["🔥 Mayor % a la Alza (Descendente)", "🟢 Solo en Alza (+)"]:
+                    # Ordenamientos
+                    if trend_filter in ["🔥 Mayor % a la Alza", "🟢 Solo en Alza (+)"]:
                         filtered_items = filtered_items.sort_values(by='trend_pct', ascending=False)
-                    elif trend_filter in ["📉 Mayor % a la Baja (Ascendente)", "🔴 Solo en Baja (-)"]:
+                    elif trend_filter in ["📉 Mayor % a la Baja", "🔴 Solo en Baja (-)"]:
                         filtered_items = filtered_items.sort_values(by='trend_pct', ascending=True)
                     else:
                         filtered_items = filtered_items.sort_values(by='market_price', ascending=False)
                     
                     if not filtered_items.empty:
                         found_any = True
-                        with st.expander(f"🔥 {group_name}", expanded=True):
+                        with st.expander(f"📁 {group_name}", expanded=True):
                             for _, item in filtered_items.iterrows():
                                 p_val = item['market_price'] * mult
                                 trend = item['trend_pct']
                                 
                                 if trend > 1.0:
-                                    badge = f"<span class='trend-up'>▲ +{trend}% (En Alta)</span>"
+                                    badge = f"<span class='badge-up'>▲ +{trend}%</span>"
                                 elif trend < -1.0:
-                                    badge = f"<span class='trend-down'>▼ {trend}% (En Baja)</span>"
+                                    badge = f"<span class='badge-down'>▼ {trend}%</span>"
                                 else:
-                                    badge = f"<span class='trend-flat'>➔ Estable</span>"
+                                    badge = f"<span class='badge-flat'>➔ {trend}%</span>"
                                 
                                 st.markdown(f"""
-                                <div class="product-row">
-                                    <div>
-                                        <b>{item['cleanName']}</b><br>
-                                        {badge}
+                                <div class="collector-card">
+                                    <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+                                        <div>
+                                            <div class="card-title">{item['cleanName']}</div>
+                                            <div style="margin-top: 6px;">{badge}</div>
+                                        </div>
+                                        <div class="card-price">{symbol}{p_val:,.2f}</div>
                                     </div>
-                                    <div class="price-tag">{symbol}{p_val:,.2f}</div>
                                 </div>
                                 """, unsafe_allow_html=True)
                                 
         if not found_any:
-            st.warning(f"No se encontraron productos que coincidan con '{search_query}'. Prueba escribiendo solo el personaje o tipo de producto (ej. `charizard`, `moltres`, `upc` o `promo`).")
-    else:
-        st.info("💡 Escribe términos como `charizard upc`, `moltres`, `promo`, `base set` o `151` para consultar productos sellados históricos o actuales.")
-else:
-    st.error("⚠️ No se pudo conectar con los servidores de datos en este momento.")
+            st.warning(f"No se encontraron productos para '{search_query}'. Prueba escribiendo solo el personaje o tipo de caja.")
+    elif not search_query:
+        st.info("💡 Usa la barra de búsqueda de arriba para explorar cualquier producto sellado o colección histórica.")

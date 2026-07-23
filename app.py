@@ -1,7 +1,6 @@
 import streamlit as st
 import requests
 import pandas as pd
-from datetime import datetime
 
 st.set_page_config(
     page_title="TCG Live Market Tracker",
@@ -13,59 +12,59 @@ st.markdown("""
     <style>
     .stButton>button { width: 100%; border-radius: 12px; height: 3em; font-weight: bold; }
     div[data-testid="metric-container"] { background-color: #f0f2f6; padding: 10px; border-radius: 10px; }
-    .product-box { border-bottom: 1px solid #ddd; padding: 10px 0; }
+    .product-box { border-bottom: 1px solid #333; padding: 8px 0; }
     </style>
 """, unsafe_allow_html=True)
 
 # 1. Obtener Tipo de Cambio (MXN)
-@st.cache_data(ttl=3600) # Se actualiza cada hora
+@st.cache_data(ttl=3600)
 def get_exchange_rate():
     try:
         url = "https://open.er-api.com/v6/latest/USD"
         res = requests.get(url, timeout=5)
         if res.status_code == 200:
             return res.json().get("rates", {}).get("MXN", 18.0)
-    except:
+    except Exception:
         pass
     return 18.0
 
-# 2. Cargar todas las expansiones de Pokémon (Category 3 en TCGplayer)
-@st.cache_data(ttl=86400) # Se actualiza una vez al día
+# 2. Obtener grupos/expansiones de TCGCSV con User-Agent para evitar bloqueos
+@st.cache_data(ttl=14400, show_spinner=False)
 def get_tcg_groups():
     url = "https://tcgcsv.com/3/groups"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     try:
-        res = requests.get(url, timeout=10)
+        res = requests.get(url, headers=headers, timeout=12)
         if res.status_code == 200:
-            df = pd.DataFrame(res.json()["results"])
-            # Filtramos para asegurarnos que tengan nombre
-            df = df.dropna(subset=['name'])
-            # Ordenamos por fecha de publicación descendente
-            if 'publishedOn' in df.columns:
-                df = df.sort_values(by='publishedOn', ascending=False)
-            return df
+            df = pd.DataFrame(res.json().get("results", []))
+            if not df.empty and 'name' in df.columns:
+                df = df.dropna(subset=['name'])
+                if 'publishedOn' in df.columns:
+                    df = df.sort_values(by='publishedOn', ascending=False)
+                return df, None
+        return pd.DataFrame(), f"Respuesta de servidor: Código {res.status_code}"
     except Exception as e:
-        st.error(f"Error cargando expansiones: {e}")
-    return pd.DataFrame()
+        return pd.DataFrame(), str(e)
 
-# 3. Cargar productos y precios exactos de una expansión
-@st.cache_data(ttl=3600)
+# 3. Obtener precios reales de una expansión
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_set_market_data(group_id):
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     prod_url = f"https://tcgcsv.com/3/{group_id}/products"
     price_url = f"https://tcgcsv.com/3/{group_id}/prices"
     
     try:
-        prod_res = requests.get(prod_url, timeout=10)
-        price_res = requests.get(price_url, timeout=10)
+        prod_res = requests.get(prod_url, headers=headers, timeout=12)
+        price_res = requests.get(price_url, headers=headers, timeout=12)
         
         if prod_res.status_code == 200 and price_res.status_code == 200:
-            df_prod = pd.DataFrame(prod_res.json()["results"])
-            df_price = pd.DataFrame(price_res.json()["results"])
+            df_prod = pd.DataFrame(prod_res.json().get("results", []))
+            df_price = pd.DataFrame(price_res.json().get("results", []))
             
             if not df_prod.empty and not df_price.empty:
-                # Unimos la información del producto con su precio usando el productId
                 df_merged = pd.merge(df_prod, df_price, on="productId")
                 return df_merged
-    except:
+    except Exception:
         pass
     return pd.DataFrame()
 
@@ -85,17 +84,17 @@ multiplier = usd_mxn_rate if is_mxn else 1.0
 symbol = "MXN $" if is_mxn else "$"
 
 # Cargar Expansiones
-df_groups = get_tcg_groups()
+with st.spinner("Cargando lista de expansiones..."):
+    df_groups, error_msg = get_tcg_groups()
 
 if not df_groups.empty:
-    search_query = st.text_input("🔍 Buscar expansión (Ej: Evolving Skies, Stellar Crown, Obsidian...):")
+    search_query = st.text_input("🔍 Buscar expansión (Ej: Ascended, Evolving, Stellar, 151):")
     
     if search_query:
-        # Filtrar expansiones que coincidan con la búsqueda
         matches = df_groups[df_groups['name'].str.contains(search_query, case=False, na=False)]
         
         if matches.empty:
-            st.warning("No se encontró ninguna expansión con ese nombre.")
+            st.warning(f"No se encontró ninguna expansión que coincida con '{search_query}'.")
         else:
             for _, group in matches.iterrows():
                 group_id = group['groupId']
@@ -106,22 +105,18 @@ if not df_groups.empty:
                         df_market = get_set_market_data(group_id)
                     
                     if not df_market.empty:
-                        # Identificar cuáles son productos sellados mediante palabras clave
                         sealed_keywords = ['booster box', 'elite trainer box', 'booster bundle', 
-                                         'blister', 'premium collection', 'tin', 'box', 'display']
+                                           'blister', 'premium collection', 'tin', 'box', 'display']
                         
-                        # Crear una columna booleana para filtrar
                         pattern = '|'.join(sealed_keywords)
                         df_market['is_sealed'] = df_market['cleanName'].str.contains(pattern, case=False, na=False)
                         
-                        # Extraer el precio real (priorizamos Market Price, luego Low Price si no hay ventas recientes)
-                        df_market['actual_price'] = df_market['marketPrice'].fillna(df_market['lowPrice']).fillna(0)
+                        # Priorizar Market Price, luego Mid / Low Price
+                        df_market['actual_price'] = df_market['marketPrice'].fillna(df_market['midPrice']).fillna(df_market['lowPrice']).fillna(0)
                         
-                        # Filtrar solo productos sellados que tengan un precio mayor a 0
                         df_sealed = df_market[(df_market['is_sealed'] == True) & (df_market['actual_price'] > 0)]
                         
                         if not df_sealed.empty:
-                            # Ordenar por precio descendente para ver las cajas más caras primero
                             df_sealed = df_sealed.sort_values(by='actual_price', ascending=False)
                             
                             for _, item in df_sealed.iterrows():
@@ -129,23 +124,19 @@ if not df_groups.empty:
                                 url_tcg = f"https://www.tcgplayer.com/product/{item['productId']}"
                                 
                                 s1, s2 = st.columns([3, 1])
-                                s1.markdown(f"**[{item['name']}]({url_tcg})**")
-                                s2.markdown(f"<h4 style='text-align: right; margin-top: 0;'>{symbol}{item_price:,.2f}</h4>", unsafe_allow_html=True)
+                                s1.markdown(f"• [{item['name']}]({url_tcg})")
+                                s2.markdown(f"**{symbol}{item_price:,.2f}**")
                                 st.markdown("<div class='product-box'></div>", unsafe_allow_html=True)
                         else:
-                            st.info("No se encontraron productos sellados con precio para esta expansión.")
-                            
-                        # Extra: Mostrar las 3 cartas más caras del set como referencia
-                        df_cards = df_market[(df_market['is_sealed'] == False) & (df_market['actual_price'] > 0)]
-                        if not df_cards.empty:
-                            df_cards = df_cards.sort_values(by='actual_price', ascending=False).head(3)
-                            st.markdown("---")
-                            st.caption("🏆 **Top 3 Cartas más caras (Referencia):**")
-                            for _, card in df_cards.iterrows():
-                                card_price = card['actual_price'] * multiplier
-                                st.write(f"• {card['name']} — **{symbol}{card_price:,.2f}**")
+                            st.info("No se encontraron productos sellados con precio registrado para esta colección.")
                     else:
-                        st.error("No se pudo obtener la información de precios de esta expansión.")
+                        st.error("No se pudieron cargar los precios para esta expansión en este momento.")
+    else:
+        st.info("💡 Escribe el nombre de la expansión en la barra de arriba para ver sus productos sellados.")
 else:
-    st.info("Cargando base de datos inicial...")
-    
+    st.error("⚠️ No se pudo conectar con el servidor de datos de TCGplayer.")
+    if error_msg:
+        st.caption(f"Detalle del problema: `{error_msg}`")
+    if st.button("🔄 Reintentar conexión"):
+        st.cache_data.clear()
+        st.rerun()

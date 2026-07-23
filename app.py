@@ -9,20 +9,41 @@ st.set_page_config(
     layout="centered"
 )
 
-# Estilos CSS avanzados estilo Dashboard / App de Coleccionista
+# Estilos CSS avanzados estilo Dashboard / Collector App con soporte para imágenes
 st.markdown("""
     <style>
-    /* Estilos generales */
     .stButton>button { width: 100%; border-radius: 12px; height: 3em; font-weight: bold; }
     
-    /* Contenedor de Tarjeta de Producto */
+    /* Contenedor de Tarjeta con Flexbox para Imagen + Texto */
     .collector-card {
         background-color: #1e222a;
         border: 1px solid #2d3139;
         border-radius: 12px;
-        padding: 14px;
-        margin-bottom: 10px;
+        padding: 12px;
+        margin-bottom: 12px;
+        display: flex;
+        align-items: center;
+        gap: 14px;
         box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
+    }
+    
+    .product-img {
+        width: 75px;
+        height: 75px;
+        object-fit: contain;
+        background-color: #14171d;
+        border-radius: 8px;
+        padding: 4px;
+        flex-shrink: 0;
+    }
+    
+    .card-content {
+        flex-grow: 1;
+    }
+    
+    .card-price-container {
+        text-align: right;
+        flex-shrink: 0;
     }
     
     /* Badges de tendencia */
@@ -32,7 +53,7 @@ st.markdown("""
         padding: 4px 8px;
         border-radius: 6px;
         font-weight: bold;
-        font-size: 0.85em;
+        font-size: 0.82em;
     }
     .badge-down {
         background-color: rgba(255, 82, 82, 0.15);
@@ -40,34 +61,38 @@ st.markdown("""
         padding: 4px 8px;
         border-radius: 6px;
         font-weight: bold;
-        font-size: 0.85em;
+        font-size: 0.82em;
     }
     .badge-flat {
         background-color: rgba(255, 255, 255, 0.1);
         color: #aaa;
         padding: 4px 8px;
         border-radius: 6px;
-        font-size: 0.85em;
+        font-size: 0.82em;
     }
     
     .card-price {
-        font-size: 1.25em;
+        font-size: 1.15em;
         font-weight: bold;
         color: #ffffff;
-        text-align: right;
     }
     .card-title {
-        font-size: 1.0em;
+        font-size: 0.95em;
         font-weight: 600;
         color: #f0f2f6;
         margin-bottom: 4px;
+        line-height: 1.2;
     }
     .card-subtitle {
-        font-size: 0.8em;
+        font-size: 0.78em;
         color: #8b949e;
+        margin-bottom: 6px;
     }
     </style>
 """, unsafe_allow_html=True)
+
+# Imagen por defecto si un producto no tiene foto disponible
+DEFAULT_IMG = "https://tcgplayer-cdn.tcgplayer.com/product/284000_200w.jpg"
 
 # 1. Obtener Tipo de Cambio USD -> MXN
 @st.cache_data(ttl=3600)
@@ -94,7 +119,7 @@ def get_tcg_groups():
         pass
     return pd.DataFrame()
 
-# 3. Cargar productos sellados y calcular tendencias
+# 3. Cargar productos sellados, fotos y calcular tendencias
 @st.cache_data(ttl=900, show_spinner=False)
 def get_sealed_with_trends(group_id):
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -125,6 +150,12 @@ def get_sealed_with_trends(group_id):
                 df_sealed['market_price'] = df_sealed['marketPrice'].fillna(0.0)
                 df_sealed['low_price'] = df_sealed['lowPrice'].fillna(0.0)
                 
+                # Manejo de imagen
+                if 'imageUrl' not in df_sealed.columns:
+                    df_sealed['imageUrl'] = DEFAULT_IMG
+                else:
+                    df_sealed['imageUrl'] = df_sealed['imageUrl'].fillna(DEFAULT_IMG)
+                
                 def calc_trend(row):
                     mp = row['market_price']
                     lp = row['low_price']
@@ -143,7 +174,6 @@ def get_sealed_with_trends(group_id):
 # Cargar catálogo destacado inicial para el Home
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_featured_market_data(df_groups):
-    # Selecciona los principales sets más populares recientes y promos
     featured_keywords = ['151', 'Evolving Skies', 'Paldea', 'Crown Zenith', 'Obsidian', 'Prismatic', 'Promo', 'Stellar', 'Surging', 'Twilight']
     pattern = '|'.join(featured_keywords)
     
@@ -184,10 +214,10 @@ tab_home, tab_search = st.tabs(["🏠 Inicio / Tendencias", "🔍 Buscador & Mer
 # PESTAÑA 1: HOME / DASHBOARD DE TENDENCIAS
 # ---------------------------------------------------------
 with tab_home:
-    st.caption("Resumen del mercado sellado de Pokémon TCG en tiempo real.")
+    st.caption("Resumen visual del mercado sellado en tiempo real.")
     
     if not df_groups.empty:
-        with st.spinner("Analizando tendencias destacadas del mercado..."):
+        with st.spinner("Cargando tendencias e imágenes del mercado..."):
             df_featured = get_featured_market_data(df_groups)
         
         if not df_featured.empty:
@@ -198,17 +228,17 @@ with tab_home:
             for _, item in top_gainers.iterrows():
                 p_val = item['market_price'] * mult
                 trend = item['trend_pct']
+                img_url = item['imageUrl']
                 
                 st.markdown(f"""
                 <div class="collector-card">
-                    <div style="display: flex; justify-content: space-between; align-items: flex-start;">
-                        <div>
-                            <div class="card-title">{item['cleanName']}</div>
-                            <div class="card-subtitle">📁 {item['group_name']}</div>
-                            <div style="margin-top: 8px;">
-                                <span class="badge-up">▲ +{trend}% En Alta</span>
-                            </div>
-                        </div>
+                    <img src="{img_url}" class="product-img" alt="product">
+                    <div class="card-content">
+                        <div class="card-title">{item['cleanName']}</div>
+                        <div class="card-subtitle">📁 {item['group_name']}</div>
+                        <div><span class="badge-up">▲ +{trend}% En Alta</span></div>
+                    </div>
+                    <div class="card-price-container">
                         <div class="card-price">{symbol}{p_val:,.2f}</div>
                     </div>
                 </div>
@@ -223,19 +253,19 @@ with tab_home:
             for _, item in top_losers.iterrows():
                 p_val = item['market_price'] * mult
                 trend = item['trend_pct']
+                img_url = item['imageUrl']
                 badge_class = "badge-down" if trend < 0 else "badge-flat"
                 sign = "" if trend < 0 else "+"
                 
                 st.markdown(f"""
                 <div class="collector-card">
-                    <div style="display: flex; justify-content: space-between; align-items: flex-start;">
-                        <div>
-                            <div class="card-title">{item['cleanName']}</div>
-                            <div class="card-subtitle">📁 {item['group_name']}</div>
-                            <div style="margin-top: 8px;">
-                                <span class="{badge_class}">▼ {sign}{trend}% Ajuste</span>
-                            </div>
-                        </div>
+                    <img src="{img_url}" class="product-img" alt="product">
+                    <div class="card-content">
+                        <div class="card-title">{item['cleanName']}</div>
+                        <div class="card-subtitle">📁 {item['group_name']}</div>
+                        <div><span class="{badge_class}">▼ {sign}{trend}% Ajuste</span></div>
+                    </div>
+                    <div class="card-price-container">
                         <div class="card-price">{symbol}{p_val:,.2f}</div>
                     </div>
                 </div>
@@ -244,7 +274,7 @@ with tab_home:
         st.error("No se pudieron cargar los datos del mercado en el Inicio.")
 
 # ---------------------------------------------------------
-# PESTAÑA 2: BUSCADOR COMPLETO
+# PESTAÑA 2: BUSCADOR COMPLETO CON FOTOS
 # ---------------------------------------------------------
 with tab_search:
     st.subheader("⚙️ Buscador Global de Productos")
@@ -315,6 +345,7 @@ with tab_search:
                             for _, item in filtered_items.iterrows():
                                 p_val = item['market_price'] * mult
                                 trend = item['trend_pct']
+                                img_url = item['imageUrl']
                                 
                                 if trend > 1.0:
                                     badge = f"<span class='badge-up'>▲ +{trend}%</span>"
@@ -325,11 +356,12 @@ with tab_search:
                                 
                                 st.markdown(f"""
                                 <div class="collector-card">
-                                    <div style="display: flex; justify-content: space-between; align-items: flex-start;">
-                                        <div>
-                                            <div class="card-title">{item['cleanName']}</div>
-                                            <div style="margin-top: 6px;">{badge}</div>
-                                        </div>
+                                    <img src="{img_url}" class="product-img" alt="product">
+                                    <div class="card-content">
+                                        <div class="card-title">{item['cleanName']}</div>
+                                        <div style="margin-top: 4px;">{badge}</div>
+                                    </div>
+                                    <div class="card-price-container">
                                         <div class="card-price">{symbol}{p_val:,.2f}</div>
                                     </div>
                                 </div>
@@ -338,4 +370,4 @@ with tab_search:
         if not found_any:
             st.warning(f"No se encontraron productos para '{search_query}'. Prueba escribiendo solo el personaje o tipo de caja.")
     elif not search_query:
-        st.info("💡 Usa la barra de búsqueda de arriba para explorar cualquier producto sellado o colección histórica.")
+        st.info("💡 Usa la barra de búsqueda de arriba para explorar cualquier producto sellado con foto y precio en vivo.")

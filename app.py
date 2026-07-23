@@ -119,7 +119,7 @@ def get_tcg_groups():
         pass
     return pd.DataFrame()
 
-# 3. Cargar EXCLUSIVAMENTE CAJAS Y PRODUCTO SELLADO (Filtro por Lista Blanca Estricta)
+# 3. Cargar EXCLUSIVAMENTE CAJAS Y PRODUCTO SELLADO (Bloqueo absoluto de cartas, energías y cubos)
 @st.cache_data(ttl=900, show_spinner=False)
 def get_sealed_boxes_only(group_id):
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -140,14 +140,23 @@ def get_sealed_boxes_only(group_id):
                 def is_strictly_sealed(name):
                     n_lower = str(name).lower()
                     
-                    # REGLA 0: Bloquear de forma absoluta códigos digitales o cartas individuales explícitas
-                    if n_lower.startswith("code card") or "code card" in n_lower:
-                        return False
-                    if "pattern" in n_lower:
-                        return False
+                    # REGLA 0: Bloquear términos prohibidos de cartas individuales, energías o cartas de juego sueltas
+                    forbidden_card_terms = [
+                        'energy', 'cube', 'trainer', 'supporter', 'item card', 'stadium',
+                        'code card', 'pattern', 'holo', 'reverse', 'secret', 'illustration', 
+                        'full art', 'alt art', 'rare', 'promo card', 'single', 'ex ', 'gx ', 'vmax', 'vstar'
+                    ]
+                    for term in forbidden_card_terms:
+                        if term in n_lower:
+                            return False
+                            
+                    # REGLA 1: Bloquear si contiene numeraciones o diagonales típicas de cartas (ej. "01", "02", "01/198")
+                    if any(char.isdigit() for char in n_lower) and not any(box_word in n_lower for box_word in ['box', 'pack', 'tin', 'etb', 'case', 'bundle', 'collection', 'deck', 'set', 'display']):
+                        # Si tiene números pero no es una caja explícita, evaluamos si parece una carta numerada
+                        if '/' in n_lower:
+                            return False
 
-                    # REGLA 1: LISTA BLANCA DE CONTENEDORES SELLADOS FÍSICOS VÁLIDOS
-                    # El nombre DEBE incluir obligatoriamente al menos uno de estos términos de producto sellado.
+                    # REGLA 2: LISTA BLANCA ESTRICTA DE CONTENEDORES SELLADOS FÍSICOS
                     valid_sealed_keywords = [
                         'booster box', 'elite trainer box', 'etb', 'booster bundle', 
                         'collection box', 'mini tin', 'tin', 'blister', 'display', 'case',
@@ -160,21 +169,6 @@ def get_sealed_boxes_only(group_id):
                     
                     has_valid_container = any(keyword in n_lower for keyword in valid_sealed_keywords)
                     if not has_valid_container:
-                        return False
-                        
-                    # REGLA 2: Doble seguridad - Bloquear si contiene términos típicos de cartas sueltas
-                    forbidden_card_terms = [
-                        'holo', 'reverse', 'secret rare', 'illustration rare', 
-                        'full art', 'alt art', 'promo card', 'single', 'ex ', 'gx ', 'vmax', 'vstar'
-                    ]
-                    # Excepción controlada: algunas cajas dicen "Promo" o "Collection", permitimos si es caja real
-                    for term in forbidden_card_terms:
-                        if term in n_lower:
-                            if not any(safe in n_lower for safe in ['box', 'tin', 'etb', 'collection', 'upc', 'bundle', 'pack', 'display']):
-                                return False
-                                
-                    # REGLA 3: Bloquear numeraciones de cartas (ej. "001/198")
-                    if '/' in n_lower:
                         return False
 
                     return True

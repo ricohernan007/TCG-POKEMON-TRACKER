@@ -29,6 +29,19 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+@st.cache_data(ttl=3600)
+def get_exchange_rate_usd_to_mxn():
+    """ Obtenemos el tipo de cambio USD a MXN en tiempo real """
+    try:
+        url = "https://open.er-api.com/v6/latest/USD"
+        res = requests.get(url, timeout=5)
+        if res.status_code == 200:
+            data = res.json()
+            return data.get("rates", {}).get("MXN", 18.0)
+    except Exception:
+        pass
+    return 18.0  # Valor de respaldo si falla la consulta
+
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -85,7 +98,6 @@ def extract_prices_from_cards(cards):
     return tcg_prices
 
 def generate_sealed_products(set_id, set_name, max_card_price):
-    """ Genera el catálogo con enlaces directos a TCGplayer """
     formatted_name = set_name.replace(" ", "+")
     base_url = "https://www.tcgplayer.com/search/pokemon/product?productLineName=pokemon&q="
     
@@ -137,7 +149,6 @@ def sync_pokemon_data(api_key=""):
                 c.execute('INSERT OR REPLACE INTO set_prices_daily VALUES (?, ?, ?, ?)',
                           (set_id, today, avg_tcg, max_tcg))
                 
-                # Productos sellados con links
                 sealed_list = generate_sealed_products(set_id, set_name, max_tcg)
                 for item in sealed_list:
                     c.execute('INSERT OR REPLACE INTO sealed_products VALUES (?, ?, ?, ?, ?)', item)
@@ -146,7 +157,7 @@ def sync_pokemon_data(api_key=""):
                 time.sleep(0.2)
                 
             conn.commit()
-            st.toast("¡Sincronización completada exitosamente!", icon="✅")
+            st.toast("¡Datos sincronizados correctamente!", icon="✅")
     except Exception as e:
         st.error(f"Error durante la sincronización: {e}")
     finally:
@@ -155,8 +166,15 @@ def sync_pokemon_data(api_key=""):
 # INTERFAZ MÓVIL
 st.title("📦 TCG Live Market Tracker")
 
+# Obtener tipo de cambio en vivo
+usd_mxn_rate = get_exchange_rate_usd_to_mxn()
+
+# Toggle selector de moneda en la interfaz
+currency_mode = st.radio("Selecciona la moneda de visualización:", ["USD ($)", f"MXN ($ - Tipo de cambio: ${usd_mxn_rate:.2f})"], horizontal=True)
+is_mxn = "MXN" in currency_mode
+
 with st.expander("🔑 Clave de API Pokémon TCG (Opcional)"):
-    user_api_key = st.text_input("Ingresa tu API Key (para descargas más rápidas):", type="password")
+    user_api_key = st.text_input("Ingresa tu API Key:", type="password")
 
 if st.button("🔄 Sincronizar Precios"):
     with st.spinner("Actualizando catálogo de precios..."):
@@ -180,24 +198,31 @@ try:
             
         st.subheader(f"🔥 Expansiones Registradas ({len(df)})")
         
+        multiplier = usd_mxn_rate if is_mxn else 1.0
+        symbol = "MXN $" if is_mxn else "$"
+        
         for index, row in df.iterrows():
             with st.container():
                 st.markdown(f"### {row['name']}")
                 st.caption(f"Serie: {row['series']} • Lanzamiento: {row['release_date']}")
                 
-                st.markdown("**🃏 Top Cartas Sueltas (TCGplayer)**")
+                avg_p = row.get('avg_tcgplayer', 0.0) * multiplier
+                max_p = row.get('max_tcgplayer', 0.0) * multiplier
+                
+                st.markdown("**🃏 Top Cartas Sueltas**")
                 c1, c2 = st.columns(2)
-                c1.metric("Promedio Top", f"${row.get('avg_tcgplayer', 0.0):.2f}")
-                c2.metric("Carta Más Cara", f"${row.get('max_tcgplayer', 0.0):.2f}")
+                c1.metric("Promedio Top", f"{symbol}{avg_p:.2f}")
+                c2.metric("Carta Más Cara", f"{symbol}{max_p:.2f}")
                 
                 st.markdown("**📦 Productos Sellados (Mercado)**")
                 sealed_items = df_sealed[df_sealed['set_id'] == row['id']]
                 
                 if not sealed_items.empty:
                     for _, s_row in sealed_items.iterrows():
+                        p_conv = s_row['price_usd'] * multiplier
                         s1, s2 = st.columns([3, 1])
                         s1.write(f"• [{s_row['product_name']}]({s_row['url']})")
-                        s2.write(f"**${s_row['price_usd']:.2f}**")
+                        s2.write(f"**{symbol}{p_conv:.2f}**")
                 else:
                     st.caption("Sin datos registrados.")
                 
@@ -206,4 +231,3 @@ try:
         st.info("Presiona **'🔄 Sincronizar Precios'** para cargar los datos.")
 except Exception as e:
     st.warning("Presiona el botón **'🔄 Sincronizar Precios'** arriba.")
-                

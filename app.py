@@ -12,7 +12,18 @@ st.markdown("""
     <style>
     .stButton>button { width: 100%; border-radius: 12px; height: 3em; font-weight: bold; }
     div[data-testid="metric-container"] { background-color: #f0f2f6; padding: 10px; border-radius: 10px; }
-    .product-box { border-bottom: 1px solid #333; padding: 8px 0; }
+    .product-row { 
+        display: flex; 
+        justify-content: space-between; 
+        align-items: center; 
+        padding: 10px 0; 
+        border-bottom: 1px solid #2d3139; 
+    }
+    .price-tag {
+        font-size: 1.1em;
+        font-weight: bold;
+        color: #00e676;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -28,40 +39,72 @@ def get_exchange_rate():
         pass
     return 18.0
 
-# 2. Obtener TODAS las expansiones oficial de Pokémon TCG
-@st.cache_data(ttl=86400)
-def get_all_sets():
-    url = "https://api.pokemontcg.io/v2/sets"
+# 2. Obtener lista completa de expansiones de Pokémon (Category ID 3 en TCGplayer)
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_tcg_groups():
+    url = "https://tcgcsv.com/tcgplayer/3/groups"
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        res = requests.get(url, timeout=10)
+        res = requests.get(url, headers=headers, timeout=10)
         if res.status_code == 200:
-            data = res.json().get("data", [])
+            data = res.json().get("results", [])
             df = pd.DataFrame(data)
-            # Ordenar por fecha de lanzamiento más reciente
-            if 'releaseDate' in df.columns:
-                df = df.sort_values(by='releaseDate', ascending=False)
-            return df
+            if not df.empty and 'name' in df.columns:
+                return df, None
+        return pd.DataFrame(), f"Error HTTP {res.status_code}"
+    except Exception as e:
+        return pd.DataFrame(), str(e)
+
+# 3. Obtener productos y precios reales de mercado (Market Price) para una expansión
+@st.cache_data(ttl=900, show_spinner=False)  # Se actualiza cada 15 minutos
+def get_sealed_products_and_prices(group_id):
+    headers = {"User-Agent": "Mozilla/5.0"}
+    
+    # Endpoints de productos y precios de TCGplayer
+    prod_url = f"https://tcgcsv.com/tcgplayer/3/{group_id}/products"
+    price_url = f"https://tcgcsv.com/tcgplayer/3/{group_id}/prices"
+    
+    try:
+        p_res = requests.get(prod_url, headers=headers, timeout=12)
+        pr_res = requests.get(price_url, headers=headers, timeout=12)
+        
+        if p_res.status_code == 200 and pr_res.status_code == 200:
+            df_prod = pd.DataFrame(p_res.json().get("results", []))
+            df_price = pd.DataFrame(pr_res.json().get("results", []))
+            
+            if not df_prod.empty and not df_price.empty:
+                # Cruzar la información de producto con sus precios
+                merged = pd.merge(df_prod, df_price, on="productId")
+                
+                # Palabras clave para filtrar ÚNICAMENTE productos sellados / cajas
+                sealed_keywords = [
+                    'booster box', 'elite trainer box', 'booster bundle', 
+                    'collection box', 'tin', 'blister', 'display', 
+                    'premium collection', 'box', 'etb', 'case'
+                ]
+                pattern = '|'.join(sealed_keywords)
+                
+                # Filtrar solo cajas y omitir cartas individuales
+                df_sealed = merged[merged['cleanName'].str.contains(pattern, case=False, na=False)].copy()
+                
+                # Determinar el precio real (Prioridad: Market Price -> Mid Price -> Low Price)
+                df_sealed['actual_price'] = (
+                    df_sealed['marketPrice']
+                    .fillna(df_sealed['midPrice'])
+                    .fillna(df_sealed['lowPrice'])
+                    .fillna(0.0)
+                )
+                
+                # Filtrar items que tengan precio mayor a $0
+                df_sealed = df_sealed[df_sealed['actual_price'] > 0]
+                return df_sealed.sort_values(by='actual_price', ascending=False)
     except Exception:
         pass
     return pd.DataFrame()
 
-# 3. Obtener precios de mercado de una expansión específica
-@st.cache_data(ttl=3600)
-def get_set_cards_and_prices(set_id):
-    # Consultamos las cartas del set para extraer el market price actualizado
-    url = f"https://api.pokemontcg.io/v2/cards?q=set.id:{set_id}&pageSize=50"
-    try:
-        res = requests.get(url, timeout=10)
-        if res.status_code == 200:
-            cards = res.json().get("data", [])
-            return cards
-    except Exception:
-        pass
-    return []
-
-# INTERFAZ
+# INTERFAZ DE LA APLICACIÓN
 st.title("📦 TCG Live Market Tracker")
-st.caption("Acceso automático a todas las expansiones y precios de mercado.")
+st.caption("Precios de mercado en tiempo real para productos sellados de Pokémon TCG.")
 
 # Selector de Moneda
 usd_mxn_rate = get_exchange_rate()
@@ -75,56 +118,49 @@ multiplier = usd_mxn_rate if is_mxn else 1.0
 symbol = "MXN $" if is_mxn else "$"
 
 # Cargar Expansiones
-with st.spinner("Cargando catálogo completo de expansiones..."):
-    df_sets = get_all_sets()
+with st.spinner("Conectando con la base de datos de TCGplayer..."):
+    df_groups, error_msg = get_tcg_groups()
 
-if not df_sets.empty:
-    search_query = st.text_input("🔍 Buscar expansión (Ej: Ascended, Evolving, 151, Obsidian):")
+if not df_groups.empty:
+    search_query = st.text_input(
+        "🔍 Buscar expansión o colección:", 
+        placeholder="Ej: Ascended, Evolving Skies, 151, Paldea Evolved..."
+    )
     
     if search_query:
-        matches = df_sets[df_sets['name'].str.contains(search_query, case=False, na=False)]
+        matches = df_groups[df_groups['name'].str.contains(search_query, case=False, na=False)]
         
         if matches.empty:
-            st.warning(f"No se encontró la expansión '{search_query}'.")
+            st.warning(f"No se encontró la expansión '{search_query}'. Prueba con otro nombre.")
         else:
-            for _, set_row in matches.iterrows():
-                set_name = set_row['name']
-                set_id = set_row['id']
-                total_cards = set_row.get('total', 'N/A')
-                release_date = set_row.get('releaseDate', '')
+            for _, group in matches.iterrows():
+                group_id = group['groupId']
+                group_name = group['name']
                 
-                with st.expander(f"🔥 {set_name} ({release_date[:4] if release_date else ''})", expanded=True):
-                    st.write(f"**Total de cartas en el set:** {total_cards}")
+                with st.expander(f"🔥 {group_name}", expanded=True):
+                    with st.spinner("Cargando precios en vivo..."):
+                        df_items = get_sealed_products_and_prices(group_id)
                     
-                    # Enlace directo a TCGplayer para ver productos sellados del set en vivo
-                    tcg_url = f"https://www.tcgplayer.com/search/pokemon/{set_id}?productLineName=pokemon&page=1"
-                    st.markdown(f"👉 [Ver productos sellados y precios en vivo en TCGplayer]({tcg_url})")
-                    
-                    # Cargar cartas más valiosas como referencia de valor del set
-                    cards = get_set_cards_and_prices(set_id)
-                    if cards:
-                        st.markdown("---")
-                        st.caption("🏆 **Top Cartas más valiosas del Set (Market Price):**")
-                        
-                        card_list = []
-                        for c in cards:
-                            tcg_info = c.get('tcgplayer', {}).get('prices', {})
-                            # Extraer el precio más alto disponible (Market Price)
-                            p_val = 0.0
-                            for price_type in ['holofoil', 'reverseHolofoil', 'normal', 'unlimitedHolofoil']:
-                                if price_type in tcg_info:
-                                    mp = tcg_info[price_type].get('market', 0.0)
-                                    if mp and mp > p_val:
-                                        p_val = mp
-                            if p_val > 0:
-                                card_list.append({'name': c['name'], 'number': c.get('number', ''), 'price': p_val})
-                        
-                        if card_list:
-                            df_top = pd.DataFrame(card_list).sort_values(by='price', ascending=False).head(5)
-                            for _, c_item in df_top.iterrows():
-                                price_converted = c_item['price'] * multiplier
-                                st.write(f"• **#{c_item['number']} {c_item['name']}** — {symbol}{price_converted:,.2f}")
+                    if not df_items.empty:
+                        for _, item in df_items.iterrows():
+                            price_converted = item['actual_price'] * multiplier
+                            item_name = item['cleanName']
+                            
+                            # Renderizado limpio y directo de cada caja con su precio
+                            st.markdown(f"""
+                            <div class="product-row">
+                                <div><b>{item_name}</b></div>
+                                <div class="price-tag">{symbol}{price_converted:,.2f}</div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                    else:
+                        st.info("No se encontraron precios para productos sellados en esta colección.")
     else:
-        st.info("💡 Escribe el nombre de cualquier expansión en el buscador arriba para consultar sus datos.")
+        st.info("💡 Escribe el nombre de cualquier expansión arriba para desplegar instantáneamente sus cajas y precios.")
 else:
-    st.error("No se pudo cargar el catálogo de expansiones en este momento.")
+    st.error("⚠️ Ocurrió un problema al conectar con TCGplayer.")
+    if error_msg:
+        st.caption(f"Detalle técnico: `{error_msg}`")
+    if st.button("🔄 Reintentar conexión"):
+        st.cache_data.clear()
+        st.rerun()

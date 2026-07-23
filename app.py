@@ -119,7 +119,7 @@ def get_tcg_groups():
         pass
     return pd.DataFrame()
 
-# 3. Cargar EXCLUSIVAMENTE CAJAS Y PRODUCTO SELLADO
+# 3. Cargar ESTRICTAMENTE PRODUCTOS SELLADOS Y CAJAS (Eliminando cartas individuales y promos sueltas)
 @st.cache_data(ttl=900, show_spinner=False)
 def get_sealed_boxes_only(group_id):
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -137,23 +137,34 @@ def get_sealed_boxes_only(group_id):
             if not df_prod.empty and not df_price.empty:
                 merged = pd.merge(df_prod, df_price, on="productId")
                 
+                # Palabras clave OBLIGATORIAS para asegurar que sea caja o producto sellado
                 include_keywords = [
                     'booster box', 'elite trainer box', 'booster bundle', 
                     'collection box', 'tin', 'blister', 'display', 'etb', 'case',
                     'ultra-premium', 'ultra premium', 'upc', 'premium collection', 
-                    'box set', 'collector chest', 'mini portfolio', 'booster pack'
+                    'box set', 'collector chest', 'mini portfolio', 'booster pack',
+                    'checklane', 'three-pack', 'sleeved booster'
                 ]
                 include_pattern = '|'.join(include_keywords)
                 
+                # Palabras clave PROHIBIDAS para evitar cartas individuales, promos sueltas o accesorios
                 exclude_keywords = [
                     'code card', 'online code', 'tcg live code', 'single card',
                     'playmat', 'sleeves', 'deck box', 'coin', 'dice', 'binder',
-                    'oversized card', 'jumbo card', 'promo card'
+                    'oversized card', 'jumbo card', 'promo card', 'holofoil', 
+                    'reverse holo', 'secret rare', 'illustration rare', 'ex full art',
+                    'vmax', 'vstar', 'ex promo', 'gx promo', 'v promo', 'card #'
                 ]
                 exclude_pattern = '|'.join(exclude_keywords)
                 
+                # Filtrar inclusión
                 df_sealed = merged[merged['cleanName'].str.contains(include_pattern, case=False, na=False)].copy()
+                
+                # Filtrar exclusión estricta
                 df_sealed = df_sealed[~df_sealed['cleanName'].str.contains(exclude_pattern, case=False, na=False)]
+                
+                # Filtro adicional de seguridad: si el nombre tiene un número de carta formato típico (ej. " / 198" o parecido al final), descartarlo
+                df_sealed = df_sealed[~df_sealed['cleanName'].str.contains(r'\d+\s*/\s*\d+', regex=True, na=False)]
                 
                 df_sealed['market_price'] = df_sealed['marketPrice'].fillna(0.0)
                 df_sealed['low_price'] = df_sealed['lowPrice'].fillna(0.0)
@@ -181,7 +192,7 @@ def get_sealed_boxes_only(group_id):
 # Cargar catálogo destacado inicial para el Home
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_featured_market_data(df_groups):
-    featured_keywords = ['151', 'Evolving Skies', 'Paldea', 'Crown Zenith', 'Obsidian', 'Prismatic', 'Promo', 'Stellar', 'Surging', 'Twilight']
+    featured_keywords = ['151', 'Evolving Skies', 'Paldea', 'Crown Zenith', 'Obsidian', 'Prismatic', 'Stellar', 'Surging', 'Twilight']
     pattern = '|'.join(featured_keywords)
     
     featured_groups = df_groups[df_groups['name'].str.contains(pattern, case=False, na=False)].head(15)
@@ -306,7 +317,7 @@ with tab_home:
         st.error("No se pudieron cargar las colecciones del mercado.")
 
 # ---------------------------------------------------------
-# PESTAÑA 2: BUSCADOR POR SELECCIÓN DE COLECCIÓN (IDÉNTICO AL HOME)
+# PESTAÑA 2: BUSCADOR POR SELECCIÓN DE COLECCIÓN (ESTRICTO SIN CARTAS)
 # ---------------------------------------------------------
 with tab_search:
     st.subheader("📁 Buscador por Selección de Colección")
@@ -315,7 +326,6 @@ with tab_search:
         col_sel, col_ord = st.columns([2, 1])
         
         with col_sel:
-            # Selector idéntico al de la primera pestaña
             list_of_groups_search = df_groups['name'].tolist()
             selected_search_collection = st.selectbox(
                 "Selecciona una Colección específica:",
@@ -426,7 +436,7 @@ with tab_search:
                             </div>
                             """, unsafe_allow_html=True)
                 else:
-                    st.warning("No hay resultados que coincidan con los filtros aplicados para esta colección.")
+                    st.warning("No hay resultados de cajas que coincidan con los filtros aplicados para esta colección.")
             else:
                 st.warning("No se encontraron cajas selladas para esta colección.")
     else:

@@ -9,12 +9,12 @@ st.set_page_config(
     layout="centered"
 )
 
-# Estilos CSS avanzados estilo Dashboard / Collector App con soporte para imágenes
+# Estilos CSS avanzados estilo Dashboard / Collector App con tarjetas e imágenes
 st.markdown("""
     <style>
     .stButton>button { width: 100%; border-radius: 12px; height: 3em; font-weight: bold; }
     
-    /* Contenedor de Tarjeta con Flexbox para Imagen + Texto */
+    /* Contenedor de Tarjeta con Flexbox */
     .collector-card {
         background-color: #1e222a;
         border: 1px solid #2d3139;
@@ -91,7 +91,6 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Imagen por defecto si un producto no tiene foto disponible
 DEFAULT_IMG = "https://tcgplayer-cdn.tcgplayer.com/product/284000_200w.jpg"
 
 # 1. Obtener Tipo de Cambio USD -> MXN
@@ -114,7 +113,8 @@ def get_tcg_groups():
     try:
         res = requests.get(url, headers=headers, timeout=10)
         if res.status_code == 200:
-            return pd.DataFrame(res.json().get("results", []))
+            df = pd.DataFrame(res.json().get("results", []))
+            return df.sort_values(by='name')
     except Exception:
         pass
     return pd.DataFrame()
@@ -150,7 +150,6 @@ def get_sealed_with_trends(group_id):
                 df_sealed['market_price'] = df_sealed['marketPrice'].fillna(0.0)
                 df_sealed['low_price'] = df_sealed['lowPrice'].fillna(0.0)
                 
-                # Manejo de imagen
                 if 'imageUrl' not in df_sealed.columns:
                     df_sealed['imageUrl'] = DEFAULT_IMG
                 else:
@@ -208,82 +207,113 @@ mult = usd_mxn if is_mxn else 1.0
 symbol = "MXN $" if is_mxn else "$"
 
 # PESTAÑAS PRINCIPALES DE LA APP
-tab_home, tab_search = st.tabs(["🏠 Inicio / Tendencias", "🔍 Buscador & Mercado"])
+tab_home, tab_search = st.tabs(["🏠 Inicio / Tendencias", "🔍 Buscador Global"])
 
 # ---------------------------------------------------------
-# PESTAÑA 1: HOME / DASHBOARD DE TENDENCIAS
+# PESTAÑA 1: HOME CON FILTRO DIRECTO DE COLECCIÓN
 # ---------------------------------------------------------
 with tab_home:
-    st.caption("Resumen visual del mercado sellado en tiempo real.")
+    st.subheader("📊 Análisis de Tendencias en Pantalla Principal")
     
     if not df_groups.empty:
-        with st.spinner("Cargando tendencias e imágenes del mercado..."):
-            df_featured = get_featured_market_data(df_groups)
+        # Selector de vista e interactividad por Colección
+        list_of_groups = ["🔥 Mercado General Destacado"] + df_groups['name'].tolist()
         
-        if not df_featured.empty:
-            # Top Ganadores (Alza)
-            st.subheader("🔥 Cajas y Colecciones a la Alza")
-            top_gainers = df_featured.sort_values(by='trend_pct', ascending=False).head(5)
+        selected_collection_name = st.selectbox(
+            "📁 Selecciona una Colección o Set para analizar:",
+            list_of_groups,
+            index=0
+        )
+        
+        st.markdown("---")
+        
+        df_display_items = pd.DataFrame()
+        
+        if selected_collection_name == "🔥 Mercado General Destacado":
+            with st.spinner("Analizando tendencias destacadas del mercado..."):
+                df_display_items = get_featured_market_data(df_groups)
+        else:
+            # Obtener ID del grupo seleccionado
+            selected_group = df_groups[df_groups['name'] == selected_collection_name].iloc[0]
+            with st.spinner(f"Cargando {selected_collection_name}..."):
+                df_items = get_sealed_with_trends(selected_group['groupId'])
+                if not df_items.empty:
+                    df_items['group_name'] = selected_collection_name
+                    df_display_items = df_items
+
+        if not df_display_items.empty:
+            col_up, col_down = st.columns(2)
             
-            for _, item in top_gainers.iterrows():
-                p_val = item['market_price'] * mult
-                trend = item['trend_pct']
-                img_url = item['imageUrl']
+            # --- COLUMNA 1: A LA ALZA ---
+            with col_up:
+                st.subheader("🔥 A la Alza (+)")
+                top_gainers = df_display_items.sort_values(by='trend_pct', ascending=False).head(10)
                 
-                st.markdown(f"""
-                <div class="collector-card">
-                    <img src="{img_url}" class="product-img" alt="product">
-                    <div class="card-content">
-                        <div class="card-title">{item['cleanName']}</div>
-                        <div class="card-subtitle">📁 {item['group_name']}</div>
-                        <div><span class="badge-up">▲ +{trend}% En Alta</span></div>
-                    </div>
-                    <div class="card-price-container">
-                        <div class="card-price">{symbol}{p_val:,.2f}</div>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
+                # Filtrar solo positivos si hay suficientes datos
+                gainers_filtered = top_gainers[top_gainers['trend_pct'] > 0]
+                if gainers_filtered.empty:
+                    gainers_filtered = top_gainers
                 
-            st.markdown("---")
+                for _, item in gainers_filtered.iterrows():
+                    p_val = item['market_price'] * mult
+                    trend = item['trend_pct']
+                    img_url = item['imageUrl']
+                    
+                    st.markdown(f"""
+                    <div class="collector-card">
+                        <img src="{img_url}" class="product-img" alt="product">
+                        <div class="card-content">
+                            <div class="card-title">{item['cleanName']}</div>
+                            <div class="card-subtitle">📁 {item['group_name']}</div>
+                            <div><span class="badge-up">▲ +{trend}%</span></div>
+                        </div>
+                        <div class="card-price-container">
+                            <div class="card-price">{symbol}{p_val:,.2f}</div>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
             
-            # Top Correcciones (Baja / Oportunidades)
-            st.subheader("📉 Cajas con Ajuste / En Baja")
-            top_losers = df_featured.sort_values(by='trend_pct', ascending=True).head(5)
-            
-            for _, item in top_losers.iterrows():
-                p_val = item['market_price'] * mult
-                trend = item['trend_pct']
-                img_url = item['imageUrl']
-                badge_class = "badge-down" if trend < 0 else "badge-flat"
-                sign = "" if trend < 0 else "+"
+            # --- COLUMNA 2: A LA BAJA ---
+            with col_down:
+                st.subheader("📉 A la Baja (-)")
+                top_losers = df_display_items.sort_values(by='trend_pct', ascending=True).head(10)
                 
-                st.markdown(f"""
-                <div class="collector-card">
-                    <img src="{img_url}" class="product-img" alt="product">
-                    <div class="card-content">
-                        <div class="card-title">{item['cleanName']}</div>
-                        <div class="card-subtitle">📁 {item['group_name']}</div>
-                        <div><span class="{badge_class}">▼ {sign}{trend}% Ajuste</span></div>
+                for _, item in top_losers.iterrows():
+                    p_val = item['market_price'] * mult
+                    trend = item['trend_pct']
+                    img_url = item['imageUrl']
+                    badge_class = "badge-down" if trend < 0 else "badge-flat"
+                    sign = "" if trend < 0 else "+"
+                    
+                    st.markdown(f"""
+                    <div class="collector-card">
+                        <img src="{img_url}" class="product-img" alt="product">
+                        <div class="card-content">
+                            <div class="card-title">{item['cleanName']}</div>
+                            <div class="card-subtitle">📁 {item['group_name']}</div>
+                            <div><span class="{badge_class}">▼ {sign}{trend}%</span></div>
+                        </div>
+                        <div class="card-price-container">
+                            <div class="card-price">{symbol}{p_val:,.2f}</div>
+                        </div>
                     </div>
-                    <div class="card-price-container">
-                        <div class="card-price">{symbol}{p_val:,.2f}</div>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
+                    """, unsafe_allow_html=True)
+        else:
+            st.warning("No se encontraron productos sellados con precios registrados para la colección seleccionada.")
     else:
-        st.error("No se pudieron cargar los datos del mercado en el Inicio.")
+        st.error("No se pudieron cargar las colecciones del mercado.")
 
 # ---------------------------------------------------------
-# PESTAÑA 2: BUSCADOR COMPLETO CON FOTOS
+# PESTAÑA 2: BUSCADOR MULTI-PALABRA COMPLETO
 # ---------------------------------------------------------
 with tab_search:
-    st.subheader("⚙️ Buscador Global de Productos")
+    st.subheader("⚙️ Buscador Específico por Nombre")
     
     col1, col2 = st.columns([2, 1])
     with col1:
         search_query = st.text_input(
-            "🔍 Buscar por colección, personaje o producto:", 
-            placeholder="Ej: charizard upc, moltres, 151, base set, etb..."
+            "🔍 Buscar por producto o personaje:", 
+            placeholder="Ej: charizard upc, moltres, 151, booster box..."
         )
     with col2:
         trend_filter = st.selectbox(
@@ -325,13 +355,11 @@ with tab_search:
                 filtered_items = df_items[df_items['cleanName'].apply(matches_full_product)].copy()
                 
                 if not filtered_items.empty:
-                    # Filtros de tendencia
                     if trend_filter == "🟢 Solo en Alza (+)":
                         filtered_items = filtered_items[filtered_items['trend_pct'] > 1.0]
                     elif trend_filter == "🔴 Solo en Baja (-)":
                         filtered_items = filtered_items[filtered_items['trend_pct'] < -1.0]
                     
-                    # Ordenamientos
                     if trend_filter in ["🔥 Mayor % a la Alza", "🟢 Solo en Alza (+)"]:
                         filtered_items = filtered_items.sort_values(by='trend_pct', ascending=False)
                     elif trend_filter in ["📉 Mayor % a la Baja", "🔴 Solo en Baja (-)"]:
@@ -368,6 +396,6 @@ with tab_search:
                                 """, unsafe_allow_html=True)
                                 
         if not found_any:
-            st.warning(f"No se encontraron productos para '{search_query}'. Prueba escribiendo solo el personaje o tipo de caja.")
+            st.warning(f"No se encontraron productos para '{search_query}'. Prueba escribiendo sólo el personaje o producto.")
     elif not search_query:
-        st.info("💡 Usa la barra de búsqueda de arriba para explorar cualquier producto sellado con foto y precio en vivo.")
+        st.info("💡 Escribe en la barra de búsqueda para explorar cualquier producto sellado específico.")

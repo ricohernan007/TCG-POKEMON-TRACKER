@@ -119,7 +119,7 @@ def get_tcg_groups():
         pass
     return pd.DataFrame()
 
-# 3. Cargar EXCLUSIVAMENTE CAJAS Y PRODUCTO SELLADO (Excluyendo Code Cards y Cartas)
+# 3. Cargar EXCLUSIVAMENTE CAJAS Y PRODUCTO SELLADO DE TODAS LAS COLECCIONES
 @st.cache_data(ttl=900, show_spinner=False)
 def get_sealed_boxes_only(group_id):
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -137,28 +137,41 @@ def get_sealed_boxes_only(group_id):
             if not df_prod.empty and not df_price.empty:
                 merged = pd.merge(df_prod, df_price, on="productId")
                 
-                # Palabras clave OBLIGATORIAS para ser considerado CAJA / SELLADO
-                include_keywords = [
+                # Palabras clave OBLIGATORIAS que identifican contenedores de producto sellado
+                sealed_identifiers = [
                     'booster box', 'elite trainer box', 'booster bundle', 
                     'collection box', 'tin', 'blister', 'display', 'etb', 'case',
                     'ultra-premium', 'ultra premium', 'upc', 'premium collection', 
-                    'box set', 'collector chest', 'mini portfolio', 'booster pack'
+                    'box set', 'collector chest', 'mini portfolio', 'booster pack', 
+                    'binder collection', 'poké ball', 'poke ball', 'three pack',
+                    'build & battle', 'build and battle', 'checklane', 'sleeved booster'
                 ]
-                include_pattern = '|'.join(include_keywords)
                 
-                # Palabras clave PROHIBIDAS (Code Cards, Cartas Sueltas, Accesorios)
-                exclude_keywords = [
-                    'code card', 'online code', 'tcg live code', 'single card',
-                    'playmat', 'sleeves', 'deck box', 'coin', 'dice', 'binder',
-                    'oversized card', 'jumbo card', 'promo card'
-                ]
-                exclude_pattern = '|'.join(exclude_keywords)
-                
-                # Filtrar inclusión de Cajas
-                df_sealed = merged[merged['cleanName'].str.contains(include_pattern, case=False, na=False)].copy()
-                
-                # Filtrar exclusión de Code Cards y Accesorios
-                df_sealed = df_sealed[~df_sealed['cleanName'].str.contains(exclude_pattern, case=False, na=False)]
+                def is_strictly_sealed(name):
+                    n_lower = str(name).lower()
+                    
+                    # 1. Validar que contenga obligatoriamente algún formato de caja/paquete sellado
+                    matches_sealed = any(term in n_lower for term in sealed_identifiers)
+                    if not matches_sealed:
+                        return False
+                        
+                    # 2. Bloquear cualquier rastro de carta individual, código suelto o rarezas específicas
+                    forbidden_patterns = [
+                        'code card', 'online code', 'tcg live', 'promo card', 
+                        'single', 'holo card', 'reverse holo', 'secret rare', 
+                        'illustration rare', 'full art', 'alt art'
+                    ]
+                    for pat in forbidden_patterns:
+                        if pat in n_lower:
+                            return False
+                            
+                    # 3. Evitar elementos numerados característicos de cartas sueltas (ej: "001/198")
+                    if '/' in n_lower and not any(k in n_lower for k in ['box', 'pack', 'tin', 'etb', 'case']):
+                        return False
+
+                    return True
+
+                df_sealed = merged[merged['cleanName'].apply(is_strictly_sealed)].copy()
                 
                 df_sealed['market_price'] = df_sealed['marketPrice'].fillna(0.0)
                 df_sealed['low_price'] = df_sealed['lowPrice'].fillna(0.0)
@@ -186,7 +199,7 @@ def get_sealed_boxes_only(group_id):
 # Cargar catálogo destacado inicial para el Home
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_featured_market_data(df_groups):
-    featured_keywords = ['151', 'Evolving Skies', 'Paldea', 'Crown Zenith', 'Obsidian', 'Prismatic', 'Promo', 'Stellar', 'Surging', 'Twilight']
+    featured_keywords = ['151', 'Evolving Skies', 'Paldea', 'Crown Zenith', 'Obsidian', 'Prismatic', 'Stellar', 'Surging', 'Twilight']
     pattern = '|'.join(featured_keywords)
     
     featured_groups = df_groups[df_groups['name'].str.contains(pattern, case=False, na=False)].head(15)

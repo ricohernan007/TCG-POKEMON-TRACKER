@@ -4,7 +4,7 @@ import pandas as pd
 
 # Configuración de la página
 st.set_page_config(
-    page_title="TCG Sealed Box Collector Tracker",
+    page_title="TCG Collector Live Tracker",
     page_icon="📦",
     layout="centered"
 )
@@ -119,7 +119,7 @@ def get_tcg_groups():
         pass
     return pd.DataFrame()
 
-# 3. Cargar EXCLUSIVAMENTE CAJAS Y PRODUCTO SELLADO (Bloqueo total e implacable de cartas individuales)
+# 3. Cargar EXCLUSIVAMENTE CAJAS Y PRODUCTO SELLADO (Excluyendo Code Cards y Cartas)
 @st.cache_data(ttl=900, show_spinner=False)
 def get_sealed_boxes_only(group_id):
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -137,29 +137,27 @@ def get_sealed_boxes_only(group_id):
             if not df_prod.empty and not df_price.empty:
                 merged = pd.merge(df_prod, df_price, on="productId")
                 
-                # Palabras clave estrictas que DEBE tener un producto sellado o caja
+                # Palabras clave OBLIGATORIAS para ser considerado CAJA / SELLADO
                 include_keywords = [
                     'booster box', 'elite trainer box', 'booster bundle', 
                     'collection box', 'tin', 'blister', 'display', 'etb', 'case',
                     'ultra-premium', 'ultra premium', 'upc', 'premium collection', 
-                    'box set', 'collector chest', 'mini portfolio', 'booster pack', 'binder collection'
+                    'box set', 'collector chest', 'mini portfolio', 'booster pack'
                 ]
                 include_pattern = '|'.join(include_keywords)
                 
-                # Palabras clave PROHIBIDAS (Cualquier rastro de carta individual, holo, secret rare, promo suelta, etc.)
+                # Palabras clave PROHIBIDAS (Code Cards, Cartas Sueltas, Accesorios)
                 exclude_keywords = [
-                    'card', 'holo', 'reverse', 'secret', 'alt art', 'full art', 'illustration',
-                    'ex', 'gx', 'vmax', 'vstar', 'v', 'trainer', 'energy', 'rare', 'common', 'uncommon',
-                    'code card', 'online code', 'tcg live code', 'single',
+                    'code card', 'online code', 'tcg live code', 'single card',
                     'playmat', 'sleeves', 'deck box', 'coin', 'dice', 'binder',
-                    'oversized', 'jumbo', 'promo card'
+                    'oversized card', 'jumbo card', 'promo card'
                 ]
                 exclude_pattern = '|'.join(exclude_keywords)
                 
-                # Filtrar inclusión
+                # Filtrar inclusión de Cajas
                 df_sealed = merged[merged['cleanName'].str.contains(include_pattern, case=False, na=False)].copy()
                 
-                # Filtrar exclusión absoluta (si contiene alguna palabra de carta individual, se elimina por completo)
+                # Filtrar exclusión de Code Cards y Accesorios
                 df_sealed = df_sealed[~df_sealed['cleanName'].str.contains(exclude_pattern, case=False, na=False)]
                 
                 df_sealed['market_price'] = df_sealed['marketPrice'].fillna(0.0)

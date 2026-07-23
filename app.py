@@ -119,7 +119,7 @@ def get_tcg_groups():
         pass
     return pd.DataFrame()
 
-# 3. Cargar EXCLUSIVAMENTE CAJAS Y PRODUCTO SELLADO (Excluyendo Code Cards y Cartas)
+# 3. Cargar EXCLUSIVAMENTE CAJAS Y PRODUCTO SELLADO
 @st.cache_data(ttl=900, show_spinner=False)
 def get_sealed_boxes_only(group_id):
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -137,7 +137,6 @@ def get_sealed_boxes_only(group_id):
             if not df_prod.empty and not df_price.empty:
                 merged = pd.merge(df_prod, df_price, on="productId")
                 
-                # Palabras clave OBLIGATORIAS para ser considerado CAJA / SELLADO
                 include_keywords = [
                     'booster box', 'elite trainer box', 'booster bundle', 
                     'collection box', 'tin', 'blister', 'display', 'etb', 'case',
@@ -146,7 +145,6 @@ def get_sealed_boxes_only(group_id):
                 ]
                 include_pattern = '|'.join(include_keywords)
                 
-                # Palabras clave PROHIBIDAS (Code Cards, Cartas Sueltas, Accesorios)
                 exclude_keywords = [
                     'code card', 'online code', 'tcg live code', 'single card',
                     'playmat', 'sleeves', 'deck box', 'coin', 'dice', 'binder',
@@ -154,10 +152,7 @@ def get_sealed_boxes_only(group_id):
                 ]
                 exclude_pattern = '|'.join(exclude_keywords)
                 
-                # Filtrar inclusión de Cajas
                 df_sealed = merged[merged['cleanName'].str.contains(include_pattern, case=False, na=False)].copy()
-                
-                # Filtrar exclusión de Code Cards y Accesorios
                 df_sealed = df_sealed[~df_sealed['cleanName'].str.contains(exclude_pattern, case=False, na=False)]
                 
                 df_sealed['market_price'] = df_sealed['marketPrice'].fillna(0.0)
@@ -220,7 +215,7 @@ mult = usd_mxn if is_mxn else 1.0
 symbol = "MXN $" if is_mxn else "$"
 
 # PESTAÑAS PRINCIPALES DE LA APP
-tab_home, tab_search = st.tabs(["🏠 Inicio / Tendencias de Cajas", "🔍 Buscador de Cajas por Colección"])
+tab_home, tab_search = st.tabs(["🏠 Inicio / Tendencias de Cajas", "🔍 Buscador por Colección y Cajas"])
 
 # ---------------------------------------------------------
 # PESTAÑA 1: HOME CON FILTRO EXCLUSIVO DE CAJAS
@@ -255,11 +250,9 @@ with tab_home:
         if not df_display_items.empty:
             col_up, col_down = st.columns(2)
             
-            # --- COLUMNA 1: CAJAS A LA ALZA ---
             with col_up:
                 st.subheader("🔥 Cajas a la Alza (+)")
                 top_gainers = df_display_items.sort_values(by='trend_pct', ascending=False).head(10)
-                
                 gainers_filtered = top_gainers[top_gainers['trend_pct'] > 0]
                 if gainers_filtered.empty:
                     gainers_filtered = top_gainers
@@ -283,7 +276,6 @@ with tab_home:
                     </div>
                     """, unsafe_allow_html=True)
             
-            # --- COLUMNA 2: CAJAS A LA BAJA ---
             with col_down:
                 st.subheader("📉 Cajas a la Baja (-)")
                 top_losers = df_display_items.sort_values(by='trend_pct', ascending=True).head(10)
@@ -314,141 +306,128 @@ with tab_home:
         st.error("No se pudieron cargar las colecciones del mercado.")
 
 # ---------------------------------------------------------
-# PESTAÑA 2: BUSCADOR GLOBAL DE CAJAS
+# PESTAÑA 2: BUSCADOR POR SELECCIÓN DE COLECCIÓN (IDÉNTICO AL HOME)
 # ---------------------------------------------------------
 with tab_search:
-    st.subheader("⚙️ Buscador Global de Cajas Selladas")
+    st.subheader("📁 Buscador por Selección de Colección")
     
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        search_query = st.text_input(
-            "🔍 Buscar por tipo de caja o colección:", 
-            placeholder="Ej: charizard upc, booster box, etb, 151, crown Zenith..."
-        )
-    with col2:
-        trend_filter = st.selectbox(
-            "📈 Ordenar por:",
-            [
-                "Todos (Sin Orden)",
-                "🔥 Mayor % a la Alza",
-                "📉 Mayor % a la Baja",
-                "🟢 Solo en Alza (+)",
-                "🔴 Solo en Baja (-)"
-            ]
-        )
-
-    if not df_groups.empty and search_query:
-        query_terms = search_query.lower().split()
+    if not df_groups.empty:
+        col_sel, col_ord = st.columns([2, 1])
         
-        def group_matches(name):
-            text = str(name).lower()
-            return all(term in text for term in query_terms)
-
-        direct_matches = df_groups[df_groups['name'].apply(group_matches)]
-        
-        if direct_matches.empty or any(term in ['upc', 'charizard', 'moltres', 'promo', 'box', 'tin', 'etb'] for term in query_terms):
-            groups_to_check = df_groups
-        else:
-            groups_to_check = direct_matches
+        with col_sel:
+            # Selector idéntico al de la primera pestaña
+            list_of_groups_search = df_groups['name'].tolist()
+            selected_search_collection = st.selectbox(
+                "Selecciona una Colección específica:",
+                list_of_groups_search,
+                key="search_collection_box"
+            )
             
-        found_any = False
-        all_search_items = []
-        
-        for _, group in groups_to_check.iterrows():
-            group_name = group['name']
-            df_items = get_sealed_boxes_only(group['groupId'])
+        with col_ord:
+            trend_filter = st.selectbox(
+                "📈 Ordenar por:",
+                [
+                    "🔥 Mayor % a la Alza",
+                    "📉 Mayor % a la Baja",
+                    "🟢 Solo en Alza (+)",
+                    "🔴 Solo en Baja (-)",
+                    "💵 Mayor Precio",
+                    "📉 Menor Precio"
+                ],
+                key="search_trend_filter"
+            )
             
-            if not df_items.empty:
-                def matches_full_product(product_name):
-                    full_text = f"{group_name} {product_name}".lower()
-                    return all(term in full_text for term in query_terms)
+        st.markdown("---")
+        
+        if selected_search_collection:
+            selected_group_s = df_groups[df_groups['name'] == selected_search_collection].iloc[0]
+            
+            with st.spinner(f"Cargando cajas selladas de {selected_search_collection}..."):
+                df_search_items = get_sealed_boxes_only(selected_group_s['groupId'])
                 
-                filtered_items = df_items[df_items['cleanName'].apply(matches_full_product)].copy()
+            if not df_search_items.empty:
+                df_search_items['group_name'] = selected_search_collection
                 
-                if not filtered_items.empty:
-                    filtered_items['group_name'] = group_name
-                    all_search_items.append(filtered_items)
+                # Aplicar filtros de orden y tendencia
+                if trend_filter == "🟢 Solo en Alza (+)":
+                    df_search_items = df_search_items[df_search_items['trend_pct'] > 0]
+                elif trend_filter == "🔴 Solo en Baja (-)":
+                    df_search_items = df_search_items[df_search_items['trend_pct'] < 0]
+                
+                if trend_filter == "🔥 Mayor % a la Alza":
+                    df_search_items = df_search_items.sort_values(by='trend_pct', ascending=False)
+                elif trend_filter == "📉 Mayor % a la Baja":
+                    df_search_items = df_search_items.sort_values(by='trend_pct', ascending=True)
+                elif trend_filter == "💵 Mayor Precio":
+                    df_search_items = df_search_items.sort_values(by='market_price', ascending=False)
+                elif trend_filter == "📉 Menor Precio":
+                    df_search_items = df_search_items.sort_values(by='market_price', ascending=True)
+                
+                if not df_search_items.empty:
+                    col_up_s, col_down_s = st.columns(2)
                     
-        if all_search_items:
-            df_search_display = pd.concat(all_search_items, ignore_index=True)
-            
-            if trend_filter == "🟢 Solo en Alza (+)":
-                df_search_display = df_search_display[df_search_display['trend_pct'] > 1.0]
-            elif trend_filter == "🔴 Solo en Baja (-)":
-                df_search_display = df_search_display[df_search_display['trend_pct'] < -1.0]
-            
-            if trend_filter in ["🔥 Mayor % a la Alza", "🟢 Solo en Alza (+)"]:
-                df_search_display = df_search_display.sort_values(by='trend_pct', ascending=False)
-            elif trend_filter in ["📉 Mayor % a la Baja", "🔴 Solo en Baja (-)"]:
-                df_search_display = df_search_display.sort_values(by='trend_pct', ascending=True)
+                    half_len = (len(df_search_items) + 1) // 2
+                    search_gainers = df_search_items.iloc[:half_len]
+                    search_losers = df_search_items.iloc[half_len:]
+                    
+                    with col_up_s:
+                        st.subheader("🔥 Bloque 1")
+                        for _, item in search_gainers.iterrows():
+                            p_val = item['market_price'] * mult
+                            trend = item['trend_pct']
+                            img_url = item['imageUrl']
+                            
+                            if trend > 0:
+                                badge = f"<span class='badge-up'>▲ +{trend}%</span>"
+                            elif trend < 0:
+                                badge = f"<span class='badge-down'>▼ {trend}%</span>"
+                            else:
+                                badge = f"<span class='badge-flat'>➔ {trend}%</span>"
+                            
+                            st.markdown(f"""
+                            <div class="collector-card">
+                                <img src="{img_url}" class="product-img" alt="product">
+                                <div class="card-content">
+                                    <div class="card-title">{item['cleanName']}</div>
+                                    <div class="card-subtitle">📁 {item['group_name']}</div>
+                                    <div style="margin-top: 4px;">{badge}</div>
+                                </div>
+                                <div class="card-price-container">
+                                    <div class="card-price">{symbol}{p_val:,.2f}</div>
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                            
+                    with col_down_s:
+                        st.subheader("📉 Bloque 2")
+                        for _, item in search_losers.iterrows():
+                            p_val = item['market_price'] * mult
+                            trend = item['trend_pct']
+                            img_url = item['imageUrl']
+                            
+                            if trend > 0:
+                                badge = f"<span class='badge-up'>▲ +{trend}%</span>"
+                            elif trend < 0:
+                                badge = f"<span class='badge-down'>▼ {trend}%</span>"
+                            else:
+                                badge = f"<span class='badge-flat'>➔ {trend}%</span>"
+                            
+                            st.markdown(f"""
+                            <div class="collector-card">
+                                <img src="{img_url}" class="product-img" alt="product">
+                                <div class="card-content">
+                                    <div class="card-title">{item['cleanName']}</div>
+                                    <div class="card-subtitle">📁 {item['group_name']}</div>
+                                    <div style="margin-top: 4px;">{badge}</div>
+                                </div>
+                                <div class="card-price-container">
+                                    <div class="card-price">{symbol}{p_val:,.2f}</div>
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                else:
+                    st.warning("No hay resultados que coincidan con los filtros aplicados para esta colección.")
             else:
-                df_search_display = df_search_display.sort_values(by='market_price', ascending=False)
-                
-            if not df_search_display.empty:
-                found_any = True
-                col_up_s, col_down_s = st.columns(2)
-                
-                half_len = (len(df_search_display) + 1) // 2
-                search_gainers = df_search_display.iloc[:half_len]
-                search_losers = df_search_display.iloc[half_len:]
-                
-                with col_up_s:
-                    st.subheader("🔥 Resultados (Bloque 1)")
-                    for _, item in search_gainers.iterrows():
-                        p_val = item['market_price'] * mult
-                        trend = item['trend_pct']
-                        img_url = item['imageUrl']
-                        
-                        if trend > 1.0:
-                            badge = f"<span class='badge-up'>▲ +{trend}%</span>"
-                        elif trend < -1.0:
-                            badge = f"<span class='badge-down'>▼ {trend}%</span>"
-                        else:
-                            badge = f"<span class='badge-flat'>➔ {trend}%</span>"
-                        
-                        st.markdown(f"""
-                        <div class="collector-card">
-                            <img src="{img_url}" class="product-img" alt="product">
-                            <div class="card-content">
-                                <div class="card-title">{item['cleanName']}</div>
-                                <div class="card-subtitle">📁 {item['group_name']}</div>
-                                <div style="margin-top: 4px;">{badge}</div>
-                            </div>
-                            <div class="card-price-container">
-                                <div class="card-price">{symbol}{p_val:,.2f}</div>
-                            </div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                        
-                with col_down_s:
-                    st.subheader("📉 Resultados (Bloque 2)")
-                    for _, item in search_losers.iterrows():
-                        p_val = item['market_price'] * mult
-                        trend = item['trend_pct']
-                        img_url = item['imageUrl']
-                        
-                        if trend > 1.0:
-                            badge = f"<span class='badge-up'>▲ +{trend}%</span>"
-                        elif trend < -1.0:
-                            badge = f"<span class='badge-down'>▼ {trend}%</span>"
-                        else:
-                            badge = f"<span class='badge-flat'>➔ {trend}%</span>"
-                        
-                        st.markdown(f"""
-                        <div class="collector-card">
-                            <img src="{img_url}" class="product-img" alt="product">
-                            <div class="card-content">
-                                <div class="card-title">{item['cleanName']}</div>
-                                <div class="card-subtitle">📁 {item['group_name']}</div>
-                                <div style="margin-top: 4px;">{badge}</div>
-                            </div>
-                            <div class="card-price-container">
-                                <div class="card-price">{symbol}{p_val:,.2f}</div>
-                            </div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                        
-        if not found_any:
-            st.warning(f"No se encontraron cajas selladas para '{search_query}'. Prueba escribiendo solo el tipo de caja o colección.")
-    elif not search_query:
-        st.info("💡 Escribe en la barra de búsqueda para explorar cualquier caja sellada específica.")
+                st.warning("No se encontraron cajas selladas para esta colección.")
+    else:
+        st.error("No se pudieron cargar las colecciones.")

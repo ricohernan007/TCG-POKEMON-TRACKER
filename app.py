@@ -1,9 +1,7 @@
-import sqlite3
-import pandas as pd
-import requests
 import streamlit as st
+import requests
+import pandas as pd
 from datetime import datetime
-import time
 
 st.set_page_config(
     page_title="TCG Live Market Tracker",
@@ -11,223 +9,143 @@ st.set_page_config(
     layout="centered"
 )
 
-DB_NAME = "pokemon_tcg_mobile.db"
-
 st.markdown("""
     <style>
-    .stButton>button {
-        width: 100%;
-        border-radius: 12px;
-        height: 3em;
-        font-weight: bold;
-    }
-    div[data-testid="metric-container"] {
-        background-color: #f0f2f6;
-        padding: 10px;
-        border-radius: 10px;
-    }
+    .stButton>button { width: 100%; border-radius: 12px; height: 3em; font-weight: bold; }
+    div[data-testid="metric-container"] { background-color: #f0f2f6; padding: 10px; border-radius: 10px; }
+    .product-box { border-bottom: 1px solid #ddd; padding: 10px 0; }
     </style>
 """, unsafe_allow_html=True)
 
-@st.cache_data(ttl=3600)
-def get_exchange_rate_usd_to_mxn():
-    """ Obtenemos el tipo de cambio USD a MXN en tiempo real """
+# 1. Obtener Tipo de Cambio (MXN)
+@st.cache_data(ttl=3600) # Se actualiza cada hora
+def get_exchange_rate():
     try:
         url = "https://open.er-api.com/v6/latest/USD"
         res = requests.get(url, timeout=5)
         if res.status_code == 200:
-            data = res.json()
-            return data.get("rates", {}).get("MXN", 18.0)
-    except Exception:
+            return res.json().get("rates", {}).get("MXN", 18.0)
+    except:
         pass
-    return 18.0  # Valor de respaldo si falla la consulta
+    return 18.0
 
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute('DROP TABLE IF EXISTS set_prices_daily')
-    c.execute('DROP TABLE IF EXISTS sealed_products')
-    
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS sets (
-            id TEXT PRIMARY KEY, name TEXT, series TEXT, release_date TEXT
-        )
-    ''')
-    
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS set_prices_daily (
-            set_id TEXT, date TEXT, 
-            avg_tcgplayer REAL, max_tcgplayer REAL,
-            PRIMARY KEY (set_id, date)
-        )
-    ''')
-    
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS sealed_products (
-            set_id TEXT, product_name TEXT, category TEXT, price_usd REAL, url TEXT,
-            PRIMARY KEY (set_id, product_name)
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-def get_cards_from_api(set_id, api_key=None):
-    url = f"https://api.pokemontcg.io/v2/cards?q=set.id:{set_id}&pageSize=20"
-    headers = {}
-    if api_key:
-        headers["X-Api-Key"] = api_key
-        
+# 2. Cargar todas las expansiones de Pokémon (Category 3 en TCGplayer)
+@st.cache_data(ttl=86400) # Se actualiza una vez al día
+def get_tcg_groups():
+    url = "https://tcgcsv.com/3/groups"
     try:
-        res = requests.get(url, headers=headers, timeout=10)
+        res = requests.get(url, timeout=10)
         if res.status_code == 200:
-            return res.json().get('data', [])
-    except Exception:
-        pass
-    return []
-
-def extract_prices_from_cards(cards):
-    tcg_prices = []
-    for card in cards:
-        tcg = card.get('tcgplayer', {}).get('prices', {})
-        for variant in ['holofoil', 'reverseHolofoil', 'normal', 'ultraRare', 'secretRare', '1stEditionHolofoil']:
-            if variant in tcg and 'market' in tcg[variant] and tcg[variant]['market']:
-                val = float(tcg[variant]['market'])
-                if val > 0:
-                    tcg_prices.append(val)
-                    break
-    return tcg_prices
-
-def generate_sealed_products(set_id, set_name, max_card_price):
-    formatted_name = set_name.replace(" ", "+")
-    base_url = "https://www.tcgplayer.com/search/pokemon/product?productLineName=pokemon&q="
-    
-    mult = max(0.85, min(max_card_price / 30.0, 4.0)) if max_card_price > 0 else 1.0
-    
-    products = [
-        (set_id, f"{set_name} Booster Box (36 Sobres)", "Booster Box", round(160.0 * mult, 2), f"{base_url}{formatted_name}+booster+box"),
-        (set_id, f"{set_name} Elite Trainer Box (ETB)", "ETB", round(52.0 * mult, 2), f"{base_url}{formatted_name}+elite+trainer+box"),
-        (set_id, f"{set_name} Booster Bundle (6 Sobres)", "Booster Bundle", round(28.0 * mult, 2), f"{base_url}{formatted_name}+booster+bundle"),
-        (set_id, f"{set_name} 3-Pack Blister", "Blister", round(15.0 * mult, 2), f"{base_url}{formatted_name}+3+pack+blister")
-    ]
-    
-    if any(k in set_name.lower() for k in ['151', 'charizard', 'celebrations', 'prismatic', 'crown']):
-        products.append((set_id, f"{set_name} Ultra-Premium Collection (UPC)", "UPC / Especial", round(140.0 * mult, 2), f"{base_url}{formatted_name}+ultra+premium+collection"))
-        
-    return products
-
-def sync_pokemon_data(api_key=""):
-    init_db()
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    today = datetime.now().strftime("%Y-%m-%d")
-    
-    headers = {}
-    if api_key:
-        headers["X-Api-Key"] = api_key
-
-    url_sets = "https://api.pokemontcg.io/v2/sets?orderBy=-releaseDate"
-    try:
-        res_sets = requests.get(url_sets, headers=headers, timeout=10)
-        if res_sets.status_code == 200:
-            sets_data = res_sets.json().get('data', [])
-            progress_bar = st.progress(0)
-            total_to_process = min(len(sets_data), 25)
-            
-            for index, s in enumerate(sets_data[:total_to_process]):
-                set_id = s['id']
-                set_name = s['name']
-                
-                c.execute('INSERT OR REPLACE INTO sets VALUES (?, ?, ?, ?)', 
-                          (set_id, set_name, s['series'], s['releaseDate']))
-                
-                cards = get_cards_from_api(set_id, api_key)
-                tcg_prices = extract_prices_from_cards(cards)
-                
-                avg_tcg = sum(tcg_prices) / len(tcg_prices) if tcg_prices else 0.0
-                max_tcg = max(tcg_prices) if tcg_prices else 0.0
-                
-                c.execute('INSERT OR REPLACE INTO set_prices_daily VALUES (?, ?, ?, ?)',
-                          (set_id, today, avg_tcg, max_tcg))
-                
-                sealed_list = generate_sealed_products(set_id, set_name, max_tcg)
-                for item in sealed_list:
-                    c.execute('INSERT OR REPLACE INTO sealed_products VALUES (?, ?, ?, ?, ?)', item)
-                
-                progress_bar.progress((index + 1) / total_to_process)
-                time.sleep(0.2)
-                
-            conn.commit()
-            st.toast("¡Datos sincronizados correctamente!", icon="✅")
+            df = pd.DataFrame(res.json()["results"])
+            # Filtramos para asegurarnos que tengan nombre
+            df = df.dropna(subset=['name'])
+            # Ordenamos por fecha de publicación descendente
+            if 'publishedOn' in df.columns:
+                df = df.sort_values(by='publishedOn', ascending=False)
+            return df
     except Exception as e:
-        st.error(f"Error durante la sincronización: {e}")
-    finally:
-        conn.close()
+        st.error(f"Error cargando expansiones: {e}")
+    return pd.DataFrame()
+
+# 3. Cargar productos y precios exactos de una expansión
+@st.cache_data(ttl=3600)
+def get_set_market_data(group_id):
+    prod_url = f"https://tcgcsv.com/3/{group_id}/products"
+    price_url = f"https://tcgcsv.com/3/{group_id}/prices"
+    
+    try:
+        prod_res = requests.get(prod_url, timeout=10)
+        price_res = requests.get(price_url, timeout=10)
+        
+        if prod_res.status_code == 200 and price_res.status_code == 200:
+            df_prod = pd.DataFrame(prod_res.json()["results"])
+            df_price = pd.DataFrame(price_res.json()["results"])
+            
+            if not df_prod.empty and not df_price.empty:
+                # Unimos la información del producto con su precio usando el productId
+                df_merged = pd.merge(df_prod, df_price, on="productId")
+                return df_merged
+    except:
+        pass
+    return pd.DataFrame()
 
 # INTERFAZ MÓVIL
 st.title("📦 TCG Live Market Tracker")
+st.caption("Precios reales del mercado extraídos directamente de TCGplayer.")
 
-# Obtener tipo de cambio en vivo
-usd_mxn_rate = get_exchange_rate_usd_to_mxn()
-
-# Toggle selector de moneda en la interfaz
-currency_mode = st.radio("Selecciona la moneda de visualización:", ["USD ($)", f"MXN ($ - Tipo de cambio: ${usd_mxn_rate:.2f})"], horizontal=True)
+# Selector de Moneda
+usd_mxn_rate = get_exchange_rate()
+currency_mode = st.radio(
+    "Moneda de visualización:", 
+    ["USD ($)", f"MXN ($ - Tipo de cambio: ${usd_mxn_rate:.2f})"], 
+    horizontal=True
+)
 is_mxn = "MXN" in currency_mode
+multiplier = usd_mxn_rate if is_mxn else 1.0
+symbol = "MXN $" if is_mxn else "$"
 
-with st.expander("🔑 Clave de API Pokémon TCG (Opcional)"):
-    user_api_key = st.text_input("Ingresa tu API Key:", type="password")
+# Cargar Expansiones
+df_groups = get_tcg_groups()
 
-if st.button("🔄 Sincronizar Precios"):
-    with st.spinner("Actualizando catálogo de precios..."):
-        sync_pokemon_data(user_api_key)
-
-try:
-    conn = sqlite3.connect(DB_NAME)
-    df_sets = pd.read_sql_query("SELECT * FROM sets ORDER BY release_date DESC", conn)
-    df_prices = pd.read_sql_query("SELECT * FROM set_prices_daily", conn)
-    df_sealed = pd.read_sql_query("SELECT * FROM sealed_products", conn)
-    conn.close()
-
-    if not df_prices.empty and not df_sets.empty:
-        df = pd.merge(df_prices, df_sets, left_on="set_id", right_on="id")
+if not df_groups.empty:
+    search_query = st.text_input("🔍 Buscar expansión (Ej: Evolving Skies, Stellar Crown, Obsidian...):")
+    
+    if search_query:
+        # Filtrar expansiones que coincidan con la búsqueda
+        matches = df_groups[df_groups['name'].str.contains(search_query, case=False, na=False)]
         
-        st.divider()
-        search_query = st.text_input("🔍 Buscar colección (ej: 151, Crown, Evolving):")
-        
-        if search_query:
-            df = df[df['name'].str.contains(search_query, case=False, na=False)]
-            
-        st.subheader(f"🔥 Expansiones Registradas ({len(df)})")
-        
-        multiplier = usd_mxn_rate if is_mxn else 1.0
-        symbol = "MXN $" if is_mxn else "$"
-        
-        for index, row in df.iterrows():
-            with st.container():
-                st.markdown(f"### {row['name']}")
-                st.caption(f"Serie: {row['series']} • Lanzamiento: {row['release_date']}")
+        if matches.empty:
+            st.warning("No se encontró ninguna expansión con ese nombre.")
+        else:
+            for _, group in matches.iterrows():
+                group_id = group['groupId']
+                group_name = group['name']
                 
-                avg_p = row.get('avg_tcgplayer', 0.0) * multiplier
-                max_p = row.get('max_tcgplayer', 0.0) * multiplier
-                
-                st.markdown("**🃏 Top Cartas Sueltas**")
-                c1, c2 = st.columns(2)
-                c1.metric("Promedio Top", f"{symbol}{avg_p:.2f}")
-                c2.metric("Carta Más Cara", f"{symbol}{max_p:.2f}")
-                
-                st.markdown("**📦 Productos Sellados (Mercado)**")
-                sealed_items = df_sealed[df_sealed['set_id'] == row['id']]
-                
-                if not sealed_items.empty:
-                    for _, s_row in sealed_items.iterrows():
-                        p_conv = s_row['price_usd'] * multiplier
-                        s1, s2 = st.columns([3, 1])
-                        s1.write(f"• [{s_row['product_name']}]({s_row['url']})")
-                        s2.write(f"**{symbol}{p_conv:.2f}**")
-                else:
-                    st.caption("Sin datos registrados.")
-                
-                st.divider()
-    else:
-        st.info("Presiona **'🔄 Sincronizar Precios'** para cargar los datos.")
-except Exception as e:
-    st.warning("Presiona el botón **'🔄 Sincronizar Precios'** arriba.")
+                with st.expander(f"🔥 {group_name}", expanded=True):
+                    with st.spinner("Consultando precios de mercado reales..."):
+                        df_market = get_set_market_data(group_id)
+                    
+                    if not df_market.empty:
+                        # Identificar cuáles son productos sellados mediante palabras clave
+                        sealed_keywords = ['booster box', 'elite trainer box', 'booster bundle', 
+                                         'blister', 'premium collection', 'tin', 'box', 'display']
+                        
+                        # Crear una columna booleana para filtrar
+                        pattern = '|'.join(sealed_keywords)
+                        df_market['is_sealed'] = df_market['cleanName'].str.contains(pattern, case=False, na=False)
+                        
+                        # Extraer el precio real (priorizamos Market Price, luego Low Price si no hay ventas recientes)
+                        df_market['actual_price'] = df_market['marketPrice'].fillna(df_market['lowPrice']).fillna(0)
+                        
+                        # Filtrar solo productos sellados que tengan un precio mayor a 0
+                        df_sealed = df_market[(df_market['is_sealed'] == True) & (df_market['actual_price'] > 0)]
+                        
+                        if not df_sealed.empty:
+                            # Ordenar por precio descendente para ver las cajas más caras primero
+                            df_sealed = df_sealed.sort_values(by='actual_price', ascending=False)
+                            
+                            for _, item in df_sealed.iterrows():
+                                item_price = item['actual_price'] * multiplier
+                                url_tcg = f"https://www.tcgplayer.com/product/{item['productId']}"
+                                
+                                s1, s2 = st.columns([3, 1])
+                                s1.markdown(f"**[{item['name']}]({url_tcg})**")
+                                s2.markdown(f"<h4 style='text-align: right; margin-top: 0;'>{symbol}{item_price:,.2f}</h4>", unsafe_allow_html=True)
+                                st.markdown("<div class='product-box'></div>", unsafe_allow_html=True)
+                        else:
+                            st.info("No se encontraron productos sellados con precio para esta expansión.")
+                            
+                        # Extra: Mostrar las 3 cartas más caras del set como referencia
+                        df_cards = df_market[(df_market['is_sealed'] == False) & (df_market['actual_price'] > 0)]
+                        if not df_cards.empty:
+                            df_cards = df_cards.sort_values(by='actual_price', ascending=False).head(3)
+                            st.markdown("---")
+                            st.caption("🏆 **Top 3 Cartas más caras (Referencia):**")
+                            for _, card in df_cards.iterrows():
+                                card_price = card['actual_price'] * multiplier
+                                st.write(f"• {card['name']} — **{symbol}{card_price:,.2f}**")
+                    else:
+                        st.error("No se pudo obtener la información de precios de esta expansión.")
+else:
+    st.info("Cargando base de datos inicial...")
+    

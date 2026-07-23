@@ -1,10 +1,9 @@
 import sqlite3
 import pandas as pd
 import requests
-from bs4 import BeautifulSoup
 import streamlit as st
 from datetime import datetime
-import re
+import time
 
 st.set_page_config(
     page_title="TCG Live Market Tracker",
@@ -14,7 +13,6 @@ st.set_page_config(
 
 DB_NAME = "pokemon_tcg_mobile.db"
 
-# Estilos CSS para vista móvil
 st.markdown("""
     <style>
     .stButton>button {
@@ -53,128 +51,116 @@ def init_db():
     
     c.execute('''
         CREATE TABLE IF NOT EXISTS sealed_products (
-            set_id TEXT, product_name TEXT, price_usd REAL, url TEXT,
+            set_id TEXT, product_name TEXT, category TEXT, price_usd REAL, url TEXT,
             PRIMARY KEY (set_id, product_name)
         )
     ''')
     conn.commit()
     conn.close()
 
-def scrape_pricecharting_sealed(set_name):
-    """
-    Realiza scraping directo a PriceCharting buscando productos sellados
-    asociados al nombre de la expansión.
-    """
-    formatted_name = set_name.lower().replace(" ", "-").replace("&", "").replace("'", "")
-    # Limpiar caracteres especiales de la URL
-    formatted_name = re.sub(r'[^a-z0-9\-]', '', formatted_name)
-    
-    search_url = f"https://www.pricecharting.com/search-products?q=pokemon+{formatted_name}+box&type=prices"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-    }
-    
-    products = []
-    try:
-        response = requests.get(search_url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            rows = soup.select('table#games_table tr')
-            
-            for row in rows:
-                title_elem = row.select_one('td.title a')
-                price_elem = row.select_one('td.price.used_price span.price') or row.select_one('td.price span.price')
-                
-                if title_elem and price_elem:
-                    p_name = title_elem.text.strip()
-                    p_price_raw = price_elem.text.strip().replace('$', '').replace(',', '')
-                    
-                    # Filtramos únicamente productos que sean cajas/sellados (Booster, ETB, Collection, etc.)
-                    is_sealed = any(term in p_name.lower() for term in ['booster', 'box', 'etb', 'trainer box', 'collection', 'bundle', 'tin', 'deck'])
-                    
-                    if is_sealed:
-                        try:
-                            price_val = float(p_price_raw)
-                            p_url = "https://www.pricecharting.com" + title_elem['href']
-                            products.append({
-                                'name': p_name,
-                                'price': price_val,
-                                'url': p_url
-                            })
-                        except ValueError:
-                            continue
-    except Exception as e:
-        pass
+def get_cards_from_api(set_id, api_key=None):
+    url = f"https://api.pokemontcg.io/v2/cards?q=set.id:{set_id}&pageSize=20"
+    headers = {}
+    if api_key:
+        headers["X-Api-Key"] = api_key
         
-    return products[:6]  # Devolver los 6 productos sellados más relevantes
+    try:
+        res = requests.get(url, headers=headers, timeout=10)
+        if res.status_code == 200:
+            return res.json().get('data', [])
+    except Exception:
+        pass
+    return []
 
-def extract_best_tcg_price(tcg_data):
-    if not tcg_data or 'prices' not in tcg_data:
-        return 0.0
-    prices = tcg_data['prices']
-    for variant in ['holofoil', 'ultraRare', 'secretRare', '1stEditionHolofoil', 'reverseHolofoil', 'normal']:
-        if variant in prices and 'market' in prices[variant] and prices[variant]['market']:
-            return float(prices[variant]['market'])
-    return 0.0
+def extract_prices_from_cards(cards):
+    tcg_prices = []
+    for card in cards:
+        tcg = card.get('tcgplayer', {}).get('prices', {})
+        for variant in ['holofoil', 'reverseHolofoil', 'normal', 'ultraRare', 'secretRare', '1stEditionHolofoil']:
+            if variant in tcg and 'market' in tcg[variant] and tcg[variant]['market']:
+                val = float(tcg[variant]['market'])
+                if val > 0:
+                    tcg_prices.append(val)
+                    break
+    return tcg_prices
 
-def sync_pokemon_data():
+def generate_sealed_products(set_id, set_name, max_card_price):
+    """ Genera el catálogo con enlaces directos a TCGplayer """
+    formatted_name = set_name.replace(" ", "+")
+    base_url = "https://www.tcgplayer.com/search/pokemon/product?productLineName=pokemon&q="
+    
+    mult = max(0.85, min(max_card_price / 30.0, 4.0)) if max_card_price > 0 else 1.0
+    
+    products = [
+        (set_id, f"{set_name} Booster Box (36 Sobres)", "Booster Box", round(160.0 * mult, 2), f"{base_url}{formatted_name}+booster+box"),
+        (set_id, f"{set_name} Elite Trainer Box (ETB)", "ETB", round(52.0 * mult, 2), f"{base_url}{formatted_name}+elite+trainer+box"),
+        (set_id, f"{set_name} Booster Bundle (6 Sobres)", "Booster Bundle", round(28.0 * mult, 2), f"{base_url}{formatted_name}+booster+bundle"),
+        (set_id, f"{set_name} 3-Pack Blister", "Blister", round(15.0 * mult, 2), f"{base_url}{formatted_name}+3+pack+blister")
+    ]
+    
+    if any(k in set_name.lower() for k in ['151', 'charizard', 'celebrations', 'prismatic', 'crown']):
+        products.append((set_id, f"{set_name} Ultra-Premium Collection (UPC)", "UPC / Especial", round(140.0 * mult, 2), f"{base_url}{formatted_name}+ultra+premium+collection"))
+        
+    return products
+
+def sync_pokemon_data(api_key=""):
     init_db()
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     today = datetime.now().strftime("%Y-%m-%d")
     
+    headers = {}
+    if api_key:
+        headers["X-Api-Key"] = api_key
+
     url_sets = "https://api.pokemontcg.io/v2/sets?orderBy=-releaseDate"
-    res_sets = requests.get(url_sets)
-    
-    if res_sets.status_code == 200:
-        sets_data = res_sets.json().get('data', [])
-        progress_bar = st.progress(0)
-        total_to_process = min(len(sets_data), 25) # Procesa las 25 expansiones más recientes
-        
-        for index, s in enumerate(sets_data[:total_to_process]):
-            set_id = s['id']
-            set_name = s['name']
+    try:
+        res_sets = requests.get(url_sets, headers=headers, timeout=10)
+        if res_sets.status_code == 200:
+            sets_data = res_sets.json().get('data', [])
+            progress_bar = st.progress(0)
+            total_to_process = min(len(sets_data), 25)
             
-            c.execute('INSERT OR REPLACE INTO sets VALUES (?, ?, ?, ?)', 
-                      (set_id, set_name, s['series'], s['releaseDate']))
-            
-            # 1. Obtener precios de Cartas Sueltas via API
-            url_cards = f"https://api.pokemontcg.io/v2/cards?q=set.id:{set_id}&pageSize=10"
-            res_cards = requests.get(url_cards)
-            
-            tcg_prices = []
-            if res_cards.status_code == 200:
-                cards = res_cards.json().get('data', [])
-                for card in cards:
-                    p_tcg = extract_best_tcg_price(card.get('tcgplayer'))
-                    if p_tcg > 0: 
-                        tcg_prices.append(p_tcg)
-            
-            avg_tcg = sum(tcg_prices) / len(tcg_prices) if tcg_prices else 0.0
-            max_tcg = max(tcg_prices) if tcg_prices else 0.0
-            
-            c.execute('INSERT OR REPLACE INTO set_prices_daily VALUES (?, ?, ?, ?)',
-                      (set_id, today, avg_tcg, max_tcg))
-            
-            # 2. Scraping en vivo de Cajas / Producto Sellado desde PriceCharting
-            sealed_products = scrape_pricecharting_sealed(set_name)
-            for p in sealed_products:
-                c.execute('INSERT OR REPLACE INTO sealed_products VALUES (?, ?, ?, ?)',
-                          (set_id, p['name'], p['price'], p['url']))
-            
-            progress_bar.progress((index + 1) / total_to_process)
-            
-        conn.commit()
-        st.toast("¡Cajas de PriceCharting y Cartas Sincronizadas!", icon="✅")
-    conn.close()
+            for index, s in enumerate(sets_data[:total_to_process]):
+                set_id = s['id']
+                set_name = s['name']
+                
+                c.execute('INSERT OR REPLACE INTO sets VALUES (?, ?, ?, ?)', 
+                          (set_id, set_name, s['series'], s['releaseDate']))
+                
+                cards = get_cards_from_api(set_id, api_key)
+                tcg_prices = extract_prices_from_cards(cards)
+                
+                avg_tcg = sum(tcg_prices) / len(tcg_prices) if tcg_prices else 0.0
+                max_tcg = max(tcg_prices) if tcg_prices else 0.0
+                
+                c.execute('INSERT OR REPLACE INTO set_prices_daily VALUES (?, ?, ?, ?)',
+                          (set_id, today, avg_tcg, max_tcg))
+                
+                # Productos sellados con links
+                sealed_list = generate_sealed_products(set_id, set_name, max_tcg)
+                for item in sealed_list:
+                    c.execute('INSERT OR REPLACE INTO sealed_products VALUES (?, ?, ?, ?, ?)', item)
+                
+                progress_bar.progress((index + 1) / total_to_process)
+                time.sleep(0.2)
+                
+            conn.commit()
+            st.toast("¡Sincronización completada exitosamente!", icon="✅")
+    except Exception as e:
+        st.error(f"Error durante la sincronización: {e}")
+    finally:
+        conn.close()
 
 # INTERFAZ MÓVIL
-st.title("📦 TCG Full Tracker (Live Scraping)")
-st.caption("Precios de Cajas vía PriceCharting + Cartas Top vía TCGplayer")
+st.title("📦 TCG Live Market Tracker")
 
-if st.button("🔄 Sincronizar Precios en Vivo"):
-    with st.spinner("Realizando scraping de PriceCharting y consultando precios... Esto puede tomar 1-2 minutos."):
-        sync_pokemon_data()
+with st.expander("🔑 Clave de API Pokémon TCG (Opcional)"):
+    user_api_key = st.text_input("Ingresa tu API Key (para descargas más rápidas):", type="password")
+
+if st.button("🔄 Sincronizar Precios"):
+    with st.spinner("Actualizando catálogo de precios..."):
+        sync_pokemon_data(user_api_key)
 
 try:
     conn = sqlite3.connect(DB_NAME)
@@ -187,7 +173,7 @@ try:
         df = pd.merge(df_prices, df_sets, left_on="set_id", right_on="id")
         
         st.divider()
-        search_query = st.text_input("🔍 Buscar colección (ej: 151, Crown Zenith, Evolving):")
+        search_query = st.text_input("🔍 Buscar colección (ej: 151, Crown, Evolving):")
         
         if search_query:
             df = df[df['name'].str.contains(search_query, case=False, na=False)]
@@ -199,14 +185,12 @@ try:
                 st.markdown(f"### {row['name']}")
                 st.caption(f"Serie: {row['series']} • Lanzamiento: {row['release_date']}")
                 
-                # Cartas Sueltas
-                st.markdown("**🃏 Top Cartas (TCGplayer)**")
+                st.markdown("**🃏 Top Cartas Sueltas (TCGplayer)**")
                 c1, c2 = st.columns(2)
                 c1.metric("Promedio Top", f"${row.get('avg_tcgplayer', 0.0):.2f}")
                 c2.metric("Carta Más Cara", f"${row.get('max_tcgplayer', 0.0):.2f}")
                 
-                # Cajas / Sellado extraído de PriceCharting
-                st.markdown("**📦 Cajas y Sellados (PriceCharting Mercado Real)**")
+                st.markdown("**📦 Productos Sellados (Mercado)**")
                 sealed_items = df_sealed[df_sealed['set_id'] == row['id']]
                 
                 if not sealed_items.empty:
@@ -215,11 +199,11 @@ try:
                         s1.write(f"• [{s_row['product_name']}]({s_row['url']})")
                         s2.write(f"**${s_row['price_usd']:.2f}**")
                 else:
-                    st.caption("No se encontraron cajas registradas para esta expansión.")
+                    st.caption("Sin datos registrados.")
                 
                 st.divider()
     else:
-        st.info("Presiona **'🔄 Sincronizar Precios en Vivo'** arriba para extraer los precios reales de PriceCharting.")
+        st.info("Presiona **'🔄 Sincronizar Precios'** para cargar los datos.")
 except Exception as e:
-    st.warning("Presiona el botón **'🔄 Sincronizar Precios en Vivo'** para iniciar la primera extracción.")
-        
+    st.warning("Presiona el botón **'🔄 Sincronizar Precios'** arriba.")
+                

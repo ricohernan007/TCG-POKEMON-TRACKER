@@ -38,7 +38,7 @@ def get_exchange_rate():
         pass
     return 18.0
 
-# 2. Cargar todas las expansiones de Pokémon TCG
+# 2. Cargar TODAS las expansiones de Pokémon TCG registradas
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_tcg_groups():
     url = "https://tcgcsv.com/tcgplayer/3/groups"
@@ -51,7 +51,7 @@ def get_tcg_groups():
         pass
     return pd.DataFrame()
 
-# 3. Cargar productos sellados y calcular tendencias
+# 3. Cargar productos sellados (incluyendo UPCs) y calcular tendencias
 @st.cache_data(ttl=900, show_spinner=False)
 def get_sealed_with_trends(group_id):
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -69,10 +69,12 @@ def get_sealed_with_trends(group_id):
             if not df_prod.empty and not df_price.empty:
                 merged = pd.merge(df_prod, df_price, on="productId")
                 
-                # Palabras clave para detectar material sellado
+                # Lista exhaustiva de palabras clave para capturar TODO el producto sellado
                 keywords = [
                     'booster box', 'elite trainer box', 'booster bundle', 
-                    'collection box', 'tin', 'blister', 'display', 'box', 'etb', 'case'
+                    'collection box', 'tin', 'blister', 'display', 'box', 'etb', 'case',
+                    'ultra-premium', 'ultra premium', 'upc', 'premium collection', 
+                    'collection', 'chest', 'pin collection', 'figure collection'
                 ]
                 pattern = '|'.join(keywords)
                 
@@ -118,7 +120,7 @@ col1, col2 = st.columns([2, 1])
 with col1:
     search_query = st.text_input(
         "🔍 Buscar expansión o producto:", 
-        placeholder="Ej: ascended elite, 151 etb, evolving box..."
+        placeholder="Ej: 151 upc, charizard ultra, ascended elite, evolving box..."
     )
 
 with col2:
@@ -137,17 +139,15 @@ df_groups = get_tcg_groups()
 
 if not df_groups.empty:
     if search_query:
-        # Dividir la consulta en palabras estilo Google
+        # Buscador estilo Google (términos divididos por espacios)
         query_terms = search_query.lower().split()
         
-        # 1. Filtrar grupos que coincidan parcialmente con alguna palabra clave
         def matches_group(name):
             text = str(name).lower()
             return any(term in text for term in query_terms)
             
         matches = df_groups[df_groups['name'].apply(matches_group)]
         
-        # Si no coincide la colección completa, tomamos todas las colecciones para buscar a nivel de producto
         if matches.empty:
             matches = df_groups
             
@@ -158,7 +158,7 @@ if not df_groups.empty:
             df_items = get_sealed_with_trends(group['groupId'])
             
             if not df_items.empty:
-                # 2. Filtrado estilo Google a nivel de producto (combina nombre de colección + nombre de producto)
+                # Coincidencia multi-palabra combinando Nombre de Set + Nombre de Producto
                 def matches_full_product(product_name):
                     full_text = f"{group_name} {product_name}".lower()
                     return all(term in full_text for term in query_terms)
@@ -166,15 +166,16 @@ if not df_groups.empty:
                 filtered_items = df_items[df_items['cleanName'].apply(matches_full_product)].copy()
                 
                 if not filtered_items.empty:
-                    # Aplicar Filtro y Ordenamiento de Tendencia
+                    # Aplicar filtros de tendencia
                     if trend_filter == "🟢 Solo en Alza (+)":
                         filtered_items = filtered_items[filtered_items['trend_pct'] > 1.0]
                     elif trend_filter == "🔴 Solo en Baja (-)":
                         filtered_items = filtered_items[filtered_items['trend_pct'] < -1.0]
                     
-                    if trend_filter == "🔥 Mayor % a la Alza (Descendente)" or trend_filter == "🟢 Solo en Alza (+)":
+                    # Ordenamiento por porcentaje
+                    if trend_filter in ["🔥 Mayor % a la Alza (Descendente)", "🟢 Solo en Alza (+)"]:
                         filtered_items = filtered_items.sort_values(by='trend_pct', ascending=False)
-                    elif trend_filter == "📉 Mayor % a la Baja (Ascendente)" or trend_filter == "🔴 Solo en Baja (-)":
+                    elif trend_filter in ["📉 Mayor % a la Baja (Ascendente)", "🔴 Solo en Baja (-)"]:
                         filtered_items = filtered_items.sort_values(by='trend_pct', ascending=True)
                     else:
                         filtered_items = filtered_items.sort_values(by='market_price', ascending=False)
@@ -204,8 +205,8 @@ if not df_groups.empty:
                                 """, unsafe_allow_html=True)
                                 
         if not found_any:
-            st.warning(f"No se encontraron productos que coincidan con '{search_query}'.")
+            st.warning(f"No se encontraron productos que coincidan con '{search_query}'. Prueba combinando otros términos.")
     else:
-        st.info("💡 Escribe términos clave en el buscador (ej. `ascended elite`, `151 box`, `evolving etb`) para filtrar instantáneamente.")
+        st.info("💡 Escribe términos clave arriba (ej. `151 upc`, `charizard ultra`, `evolving box`) para consultar cualquier caja o colección en tiempo real.")
 else:
     st.error("⚠️ No se pudo conectar con los servidores de datos en este momento.")

@@ -38,7 +38,7 @@ def get_exchange_rate():
         pass
     return 18.0
 
-# 2. Cargar TODAS las expansiones de Pokémon TCG registradas
+# 2. Cargar el 100% de los grupos/colecciones de Pokémon TCG (Incluye Promos y Vintage)
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_tcg_groups():
     url = "https://tcgcsv.com/tcgplayer/3/groups"
@@ -46,12 +46,13 @@ def get_tcg_groups():
     try:
         res = requests.get(url, headers=headers, timeout=10)
         if res.status_code == 200:
-            return pd.DataFrame(res.json().get("results", []))
+            df = pd.DataFrame(res.json().get("results", []))
+            return df
     except Exception:
         pass
     return pd.DataFrame()
 
-# 3. Cargar productos sellados (incluyendo UPCs) y calcular tendencias
+# 3. Cargar productos sellados y calcular tendencias
 @st.cache_data(ttl=900, show_spinner=False)
 def get_sealed_with_trends(group_id):
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -69,12 +70,12 @@ def get_sealed_with_trends(group_id):
             if not df_prod.empty and not df_price.empty:
                 merged = pd.merge(df_prod, df_price, on="productId")
                 
-                # Lista exhaustiva de palabras clave para capturar TODO el producto sellado
+                # Lista de filtro exhaustivo de productos sellados
                 keywords = [
                     'booster box', 'elite trainer box', 'booster bundle', 
                     'collection box', 'tin', 'blister', 'display', 'box', 'etb', 'case',
                     'ultra-premium', 'ultra premium', 'upc', 'premium collection', 
-                    'collection', 'chest', 'pin collection', 'figure collection'
+                    'collection', 'chest', 'pin collection', 'figure collection', 'box set'
                 ]
                 pattern = '|'.join(keywords)
                 
@@ -83,7 +84,7 @@ def get_sealed_with_trends(group_id):
                 df_sealed['market_price'] = df_sealed['marketPrice'].fillna(0.0)
                 df_sealed['low_price'] = df_sealed['lowPrice'].fillna(0.0)
                 
-                # Cálculo del porcentaje de variación de tendencia
+                # Porcentaje de variación
                 def calc_trend(row):
                     mp = row['market_price']
                     lp = row['low_price']
@@ -113,14 +114,14 @@ is_mxn = "MXN" in currency_mode
 mult = usd_mxn if is_mxn else 1.0
 symbol = "MXN $" if is_mxn else "$"
 
-# Filtro de comportamiento / tendencia
+# Filtros de Búsqueda
 st.subheader("⚙️ Filtros de Búsqueda")
 col1, col2 = st.columns([2, 1])
 
 with col1:
     search_query = st.text_input(
-        "🔍 Buscar expansión o producto:", 
-        placeholder="Ej: 151 upc, charizard ultra, ascended elite, evolving box..."
+        "🔍 Buscar expansión, personaje o producto:", 
+        placeholder="Ej: charizard upc, moltres, promo, base set, 151..."
     )
 
 with col2:
@@ -139,26 +140,32 @@ df_groups = get_tcg_groups()
 
 if not df_groups.empty:
     if search_query:
-        # Buscador estilo Google (términos divididos por espacios)
         query_terms = search_query.lower().split()
         
-        def matches_group(name):
+        # Estrategia de búsqueda flexible:
+        # 1. Coincidencia directa por nombre de grupo
+        def group_matches(name):
             text = str(name).lower()
-            return any(term in text for term in query_terms)
-            
-        matches = df_groups[df_groups['name'].apply(matches_group)]
+            return all(term in text for term in query_terms)
+
+        direct_matches = df_groups[df_groups['name'].apply(group_matches)]
         
-        if matches.empty:
-            matches = df_groups
+        # 2. Si es una búsqueda general de producto (ej. charizard, moltres, upc, promo),
+        # incluimos además todos los grupos con palabras clave como 'promo', 'swsh', 'sv', 'sm', 'xy', etc.
+        if direct_matches.empty or any(term in ['upc', 'charizard', 'moltres', 'promo', 'box', 'tin'] for term in query_terms):
+            # Priorizamos buscar en la lista completa para no ignorar productos en sets Promos
+            groups_to_check = df_groups
+        else:
+            groups_to_check = direct_matches
             
         found_any = False
         
-        for _, group in matches.iterrows():
+        for _, group in groups_to_check.iterrows():
             group_name = group['name']
             df_items = get_sealed_with_trends(group['groupId'])
             
             if not df_items.empty:
-                # Coincidencia multi-palabra combinando Nombre de Set + Nombre de Producto
+                # Filtrado multi-palabra (Grupo + Nombre del Producto)
                 def matches_full_product(product_name):
                     full_text = f"{group_name} {product_name}".lower()
                     return all(term in full_text for term in query_terms)
@@ -166,13 +173,13 @@ if not df_groups.empty:
                 filtered_items = df_items[df_items['cleanName'].apply(matches_full_product)].copy()
                 
                 if not filtered_items.empty:
-                    # Aplicar filtros de tendencia
+                    # Filtros de tendencia
                     if trend_filter == "🟢 Solo en Alza (+)":
                         filtered_items = filtered_items[filtered_items['trend_pct'] > 1.0]
                     elif trend_filter == "🔴 Solo en Baja (-)":
                         filtered_items = filtered_items[filtered_items['trend_pct'] < -1.0]
                     
-                    # Ordenamiento por porcentaje
+                    # Ordenamiento por Porcentaje
                     if trend_filter in ["🔥 Mayor % a la Alza (Descendente)", "🟢 Solo en Alza (+)"]:
                         filtered_items = filtered_items.sort_values(by='trend_pct', ascending=False)
                     elif trend_filter in ["📉 Mayor % a la Baja (Ascendente)", "🔴 Solo en Baja (-)"]:
@@ -205,8 +212,8 @@ if not df_groups.empty:
                                 """, unsafe_allow_html=True)
                                 
         if not found_any:
-            st.warning(f"No se encontraron productos que coincidan con '{search_query}'. Prueba combinando otros términos.")
+            st.warning(f"No se encontraron productos que coincidan con '{search_query}'. Prueba escribiendo solo el personaje o tipo de producto (ej. `charizard`, `moltres`, `upc` o `promo`).")
     else:
-        st.info("💡 Escribe términos clave arriba (ej. `151 upc`, `charizard ultra`, `evolving box`) para consultar cualquier caja o colección en tiempo real.")
+        st.info("💡 Escribe términos como `charizard upc`, `moltres`, `promo`, `base set` o `151` para consultar productos sellados históricos o actuales.")
 else:
     st.error("⚠️ No se pudo conectar con los servidores de datos en este momento.")

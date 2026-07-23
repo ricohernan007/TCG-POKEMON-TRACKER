@@ -119,7 +119,7 @@ def get_tcg_groups():
         pass
     return pd.DataFrame()
 
-# 3. Cargar EXCLUSIVAMENTE CAJAS Y PRODUCTO SELLADO (Filtros masivos anti-cartas)
+# 3. Cargar EXCLUSIVAMENTE CAJAS Y PRODUCTO SELLADO (Filtro por Lista Blanca Estricta)
 @st.cache_data(ttl=900, show_spinner=False)
 def get_sealed_boxes_only(group_id):
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -137,41 +137,46 @@ def get_sealed_boxes_only(group_id):
             if not df_prod.empty and not df_price.empty:
                 merged = pd.merge(df_prod, df_price, on="productId")
                 
-                # Contenedores válidos de producto sellado estricto
-                sealed_identifiers = [
-                    'booster box', 'elite trainer box', 'booster bundle', 
-                    'collection box', 'tin', 'blister', 'display', 'etb', 'case',
-                    'ultra-premium', 'ultra premium', 'upc', 'premium collection', 
-                    'box set', 'collector chest', 'mini portfolio', 'booster pack', 
-                    'binder collection', 'poké ball', 'poke ball', 'three pack',
-                    'build & battle', 'build and battle', 'checklane', 'sleeved booster',
-                    'checklane blister', 'three-pack blister', 'deck'
-                ]
-                
                 def is_strictly_sealed(name):
                     n_lower = str(name).lower()
                     
-                    # 1. Bloqueo masivo de exclusiones y patrones de cartas individuales
-                    card_exclusion_terms = [
-                        'pattern', 'holo', 'reverse', 'secret', 'illustration', 
-                        'full art', 'alt art', 'rare', 'promo card', 'code card', 
-                        'online code', 'tcg live', 'single', 'EX', 'GX', 'VMAX', 'VSTAR'
+                    # REGLA 0: Bloquear de forma absoluta códigos digitales o cartas individuales explícitas
+                    if n_lower.startswith("code card") or "code card" in n_lower:
+                        return False
+                    if "pattern" in n_lower:
+                        return False
+
+                    # REGLA 1: LISTA BLANCA DE CONTENEDORES SELLADOS FÍSICOS VÁLIDOS
+                    # El nombre DEBE incluir obligatoriamente al menos uno de estos términos de producto sellado.
+                    valid_sealed_keywords = [
+                        'booster box', 'elite trainer box', 'etb', 'booster bundle', 
+                        'collection box', 'mini tin', 'tin', 'blister', 'display', 'case',
+                        'ultra-premium', 'ultra premium', 'upc', 'premium collection', 
+                        'box set', 'collector chest', 'mini portfolio', 'booster pack', 
+                        'binder collection', 'poké ball', 'poke ball', 'three pack',
+                        '3-pack', 'build & battle', 'build and battle', 'checklane', 
+                        'sleeved booster', 'deck', 'fates tins', 'checklane blister'
                     ]
-                    for term in card_exclusion_terms:
+                    
+                    has_valid_container = any(keyword in n_lower for keyword in valid_sealed_keywords)
+                    if not has_valid_container:
+                        return False
+                        
+                    # REGLA 2: Doble seguridad - Bloquear si contiene términos típicos de cartas sueltas
+                    forbidden_card_terms = [
+                        'holo', 'reverse', 'secret rare', 'illustration rare', 
+                        'full art', 'alt art', 'promo card', 'single', 'ex ', 'gx ', 'vmax', 'vstar'
+                    ]
+                    # Excepción controlada: algunas cajas dicen "Promo" o "Collection", permitimos si es caja real
+                    for term in forbidden_card_terms:
                         if term in n_lower:
-                            # Permitir excepciones si el contenedor textualmente lleva la palabra pero es caja
-                            if not any(box_ok in n_lower for box_ok in ['box', 'tin', 'etb', 'collection', 'upc', 'bundle']):
+                            if not any(safe in n_lower for safe in ['box', 'tin', 'etb', 'collection', 'upc', 'bundle', 'pack', 'display']):
                                 return False
-                            
-                    # 2. Bloqueo estricto de diagonales o formatos numéricos típicos de cartas (ej. "001/198")
+                                
+                    # REGLA 3: Bloquear numeraciones de cartas (ej. "001/198")
                     if '/' in n_lower:
                         return False
 
-                    # 3. Validar obligatoriedad de contenedor sellado real
-                    matches_sealed = any(term in n_lower for term in sealed_identifiers)
-                    if not matches_sealed:
-                        return False
-                        
                     return True
 
                 df_sealed = merged[merged['cleanName'].apply(is_strictly_sealed)].copy()
@@ -331,10 +336,10 @@ with tab_home:
         st.error("No se pudieron cargar las colecciones del mercado.")
 
 # ---------------------------------------------------------
-# PESTAÑA 2: BUSCADOR POR COLECCIÓN (IDÉNTICO AL PRIMERO)
+# PESTAÑA 2: BUSCADOR POR COLECCIÓN
 # ---------------------------------------------------------
 with tab_search:
-    st.subheader("🔍 Buscador de Cajas por Colección E específica")
+    st.subheader("🔍 Buscador de Cajas por Colección Específica")
     
     if not df_groups.empty:
         search_list_of_groups = ["📁 Selecciona una colección para explorar..."] + df_groups['name'].tolist()

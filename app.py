@@ -9,12 +9,12 @@ st.set_page_config(
     layout="centered"
 )
 
-# Estilos CSS avanzados estilo Dashboard / Collector App con tarjetas e imágenes
+# Estilos CSS estilo Dashboard / Collector App
 st.markdown("""
     <style>
     .stButton>button { width: 100%; border-radius: 12px; height: 3em; font-weight: bold; }
     
-    /* Contenedor de Tarjeta con Flexbox */
+    /* Contenedor de Tarjeta */
     .collector-card {
         background-color: #1e222a;
         border: 1px solid #2d3139;
@@ -119,9 +119,9 @@ def get_tcg_groups():
         pass
     return pd.DataFrame()
 
-# 3. Cargar productos sellados, fotos y calcular tendencias
+# 3. Cargar EXCLUSIVAMENTE CAJAS Y PRODUCTO SELLADO (Excluyendo Code Cards y Cartas)
 @st.cache_data(ttl=900, show_spinner=False)
-def get_sealed_with_trends(group_id):
+def get_sealed_boxes_only(group_id):
     headers = {"User-Agent": "Mozilla/5.0"}
     prod_url = f"https://tcgcsv.com/tcgplayer/3/{group_id}/products"
     price_url = f"https://tcgcsv.com/tcgplayer/3/{group_id}/prices"
@@ -137,15 +137,28 @@ def get_sealed_with_trends(group_id):
             if not df_prod.empty and not df_price.empty:
                 merged = pd.merge(df_prod, df_price, on="productId")
                 
-                keywords = [
+                # Palabras clave OBLIGATORIAS para ser considerado CAJA / SELLADO
+                include_keywords = [
                     'booster box', 'elite trainer box', 'booster bundle', 
-                    'collection box', 'tin', 'blister', 'display', 'box', 'etb', 'case',
+                    'collection box', 'tin', 'blister', 'display', 'etb', 'case',
                     'ultra-premium', 'ultra premium', 'upc', 'premium collection', 
-                    'collection', 'chest', 'pin collection', 'figure collection', 'box set'
+                    'box set', 'collector chest', 'mini portfolio', 'booster pack'
                 ]
-                pattern = '|'.join(keywords)
+                include_pattern = '|'.join(include_keywords)
                 
-                df_sealed = merged[merged['cleanName'].str.contains(pattern, case=False, na=False)].copy()
+                # Palabras clave PROHIBIDAS (Code Cards, Cartas Sueltas, Accesorios)
+                exclude_keywords = [
+                    'code card', 'online code', 'tcg live code', 'single card',
+                    'playmat', 'sleeves', 'deck box', 'coin', 'dice', 'binder',
+                    'oversized card', 'jumbo card', 'promo card'
+                ]
+                exclude_pattern = '|'.join(exclude_keywords)
+                
+                # Filtrar inclusión de Cajas
+                df_sealed = merged[merged['cleanName'].str.contains(include_pattern, case=False, na=False)].copy()
+                
+                # Filtrar exclusión de Code Cards y Accesorios
+                df_sealed = df_sealed[~df_sealed['cleanName'].str.contains(exclude_pattern, case=False, na=False)]
                 
                 df_sealed['market_price'] = df_sealed['marketPrice'].fillna(0.0)
                 df_sealed['low_price'] = df_sealed['lowPrice'].fillna(0.0)
@@ -180,7 +193,7 @@ def get_featured_market_data(df_groups):
     
     all_items = []
     for _, group in featured_groups.iterrows():
-        df_items = get_sealed_with_trends(group['groupId'])
+        df_items = get_sealed_boxes_only(group['groupId'])
         if not df_items.empty:
             df_items['group_name'] = group['name']
             all_items.append(df_items)
@@ -195,7 +208,7 @@ usd_mxn = get_exchange_rate()
 df_groups = get_tcg_groups()
 
 # HEADER Y MONEDA
-st.title("📦 TCG Collector Tracker")
+st.title("📦 TCG Sealed Box Collector Tracker")
 
 currency_mode = st.radio(
     "Moneda de visualización:", 
@@ -207,20 +220,19 @@ mult = usd_mxn if is_mxn else 1.0
 symbol = "MXN $" if is_mxn else "$"
 
 # PESTAÑAS PRINCIPALES DE LA APP
-tab_home, tab_search = st.tabs(["🏠 Inicio / Tendencias", "🔍 Buscador Global"])
+tab_home, tab_search = st.tabs(["🏠 Inicio / Tendencias de Cajas", "🔍 Buscador de Cajas por Colección"])
 
 # ---------------------------------------------------------
-# PESTAÑA 1: HOME CON FILTRO DIRECTO DE COLECCIÓN
+# PESTAÑA 1: HOME CON FILTRO EXCLUSIVO DE CAJAS
 # ---------------------------------------------------------
 with tab_home:
-    st.subheader("📊 Análisis de Tendencias en Pantalla Principal")
+    st.subheader("📊 Mercado de Cajas y Colecciones Selladas")
     
     if not df_groups.empty:
-        # Selector de vista e interactividad por Colección
         list_of_groups = ["🔥 Mercado General Destacado"] + df_groups['name'].tolist()
         
         selected_collection_name = st.selectbox(
-            "📁 Selecciona una Colección o Set para analizar:",
+            "📁 Selecciona una Colección o Set:",
             list_of_groups,
             index=0
         )
@@ -230,13 +242,12 @@ with tab_home:
         df_display_items = pd.DataFrame()
         
         if selected_collection_name == "🔥 Mercado General Destacado":
-            with st.spinner("Analizando tendencias destacadas del mercado..."):
+            with st.spinner("Cargando tendencias de cajas destacadas..."):
                 df_display_items = get_featured_market_data(df_groups)
         else:
-            # Obtener ID del grupo seleccionado
             selected_group = df_groups[df_groups['name'] == selected_collection_name].iloc[0]
-            with st.spinner(f"Cargando {selected_collection_name}..."):
-                df_items = get_sealed_with_trends(selected_group['groupId'])
+            with st.spinner(f"Cargando cajas de {selected_collection_name}..."):
+                df_items = get_sealed_boxes_only(selected_group['groupId'])
                 if not df_items.empty:
                     df_items['group_name'] = selected_collection_name
                     df_display_items = df_items
@@ -244,12 +255,11 @@ with tab_home:
         if not df_display_items.empty:
             col_up, col_down = st.columns(2)
             
-            # --- COLUMNA 1: A LA ALZA ---
+            # --- COLUMNA 1: CAJAS A LA ALZA ---
             with col_up:
-                st.subheader("🔥 A la Alza (+)")
+                st.subheader("🔥 Cajas a la Alza (+)")
                 top_gainers = df_display_items.sort_values(by='trend_pct', ascending=False).head(10)
                 
-                # Filtrar solo positivos si hay suficientes datos
                 gainers_filtered = top_gainers[top_gainers['trend_pct'] > 0]
                 if gainers_filtered.empty:
                     gainers_filtered = top_gainers
@@ -273,9 +283,9 @@ with tab_home:
                     </div>
                     """, unsafe_allow_html=True)
             
-            # --- COLUMNA 2: A LA BAJA ---
+            # --- COLUMNA 2: CAJAS A LA BAJA ---
             with col_down:
-                st.subheader("📉 A la Baja (-)")
+                st.subheader("📉 Cajas a la Baja (-)")
                 top_losers = df_display_items.sort_values(by='trend_pct', ascending=True).head(10)
                 
                 for _, item in top_losers.iterrows():
@@ -299,21 +309,21 @@ with tab_home:
                     </div>
                     """, unsafe_allow_html=True)
         else:
-            st.warning("No se encontraron productos sellados con precios registrados para la colección seleccionada.")
+            st.warning("No se encontraron cajas selladas registradas para esta selección.")
     else:
         st.error("No se pudieron cargar las colecciones del mercado.")
 
 # ---------------------------------------------------------
-# PESTAÑA 2: BUSCADOR MULTI-PALABRA COMPLETO
+# PESTAÑA 2: BUSCADOR GLOBAL DE CAJAS
 # ---------------------------------------------------------
 with tab_search:
-    st.subheader("⚙️ Buscador Específico por Nombre")
+    st.subheader("⚙️ Buscador Global de Cajas Selladas")
     
     col1, col2 = st.columns([2, 1])
     with col1:
         search_query = st.text_input(
-            "🔍 Buscar por producto o personaje:", 
-            placeholder="Ej: charizard upc, moltres, 151, booster box..."
+            "🔍 Buscar por tipo de caja o colección:", 
+            placeholder="Ej: charizard upc, booster box, etb, 151, crown zenith..."
         )
     with col2:
         trend_filter = st.selectbox(
@@ -345,7 +355,7 @@ with tab_search:
         
         for _, group in groups_to_check.iterrows():
             group_name = group['name']
-            df_items = get_sealed_with_trends(group['groupId'])
+            df_items = get_sealed_boxes_only(group['groupId'])
             
             if not df_items.empty:
                 def matches_full_product(product_name):
@@ -396,6 +406,6 @@ with tab_search:
                                 """, unsafe_allow_html=True)
                                 
         if not found_any:
-            st.warning(f"No se encontraron productos para '{search_query}'. Prueba escribiendo sólo el personaje o producto.")
+            st.warning(f"No se encontraron cajas selladas para '{search_query}'. Prueba escribiendo solo el tipo de caja o colección.")
     elif not search_query:
-        st.info("💡 Escribe en la barra de búsqueda para explorar cualquier producto sellado específico.")
+        st.info("💡 Escribe en la barra de búsqueda para explorar cualquier caja sellada específica.")
